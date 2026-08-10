@@ -17,7 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v1.2"
+APP_VERSION = "Web v1.3"
 
 # -----------------------------
 # Models
@@ -132,56 +132,76 @@ def parse_pass_rates(rate_pdf: bytes) -> Dict[int, float]:
 def _line_text(line):
     return "".join(span.get("text", "") for span in line.get("spans", []))
 
-def _candidate_number_lines(page):
-    out = []
+def _all_page_lines(page):
+    """Return text lines in visual reading order."""
+    rows = []
     d = page.get_text("dict")
     for block in d.get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
             txt = _line_text(line).strip()
-            m = re.fullmatch(r"(\d{1,2})\.\s*", txt)
-            if m:
-                bbox = line.get("bbox", [0,0,0,0])
-                out.append((int(m.group(1)), bbox))
-    return sorted(out, key=lambda x: (x[1][1], x[1][0]))
+            if not txt:
+                continue
+            bbox = line.get("bbox", [0,0,0,0])
+            rows.append((bbox[1], bbox[0], txt, bbox))
+    return sorted(rows, key=lambda x: (x[0], x[1]))
 
 def _sequential_question_starts(doc, expected_count):
+    """
+    v1.3:
+    Supports both official PDF patterns:
+      1.
+      10. 題幹……
+    Scan in visual order and accept only the next expected question number.
+    """
     expected = 1
     starts = []
     for pi, page in enumerate(doc, start=1):
         if pi == 1:
             continue
-        for qno, bbox in _candidate_number_lines(page):
+        for _, _, txt, bbox in _all_page_lines(page):
+            m = re.match(r"^(\d{1,2})\.\s*(.*)$", txt)
+            if not m:
+                continue
+            qno = int(m.group(1))
             if qno == expected:
-                starts.append({"qno": qno, "page": pi, "bbox": bbox})
+                starts.append({
+                    "qno": qno,
+                    "page": pi,
+                    "bbox": bbox,
+                    "inline_after_number": m.group(2).strip()
+                })
                 expected += 1
                 if expected > expected_count:
                     return starts
     return starts
 
 def _region_text_and_options(page, y0, y1, qno):
-    d = page.get_text("dict")
     rows = []
-    for block in d.get("blocks", []):
-        if block.get("type") != 0:
-            continue
-        for line in block.get("lines", []):
-            bbox = line.get("bbox", [0,0,0,0])
-            cy = (bbox[1]+bbox[3])/2
-            if y0 <= cy < y1:
-                t = _line_text(line).strip()
-                if t and t not in {"請翻頁繼續作答", "請不要翻到次頁！"}:
-                    if re.fullmatch(r"\d{1,2}", t) and bbox[1] > page.rect.height-100:
-                        continue
-                    rows.append((bbox[1], bbox[0], t))
-    rows.sort(key=lambda x:(x[0],x[1]))
+    for y, x, t, bbox in _all_page_lines(page):
+        cy = (bbox[1]+bbox[3])/2
+        if y0 <= cy < y1:
+            if t in {"請翻頁繼續作答", "請不要翻到次頁！"}:
+                continue
+            if re.fullmatch(r"\d{1,2}", t) and bbox[1] > page.rect.height - 100:
+                continue
+            rows.append((y, x, t))
 
     stem_lines, options = [], {}
     current_opt = None
+    removed_q_prefix = False
+
     for _, _, t in rows:
-        if re.fullmatch(rf"{qno}\.\s*", t):
-            continue
+        if not removed_q_prefix:
+            mq = re.match(rf"^{qno}\.\s*(.*)$", t)
+            if mq:
+                rest = mq.group(1).strip()
+                removed_q_prefix = True
+                if rest:
+                    stem_lines.append(rest)
+                continue
+
         mo = re.match(r"^\s*[\(（]\s*([ABCD])\s*[\)）]\s*(.*)", t)
         if mo:
             current_opt = mo.group(1)
@@ -195,14 +215,10 @@ def _region_text_and_options(page, y0, y1, qno):
         else:
             stem_lines.append(t)
 
-    promptish = [x for x in stem_lines if ("何者" in x or "下列" in x or "根據" in x or "關於" in x)]
-    if promptish and stem_lines and stem_lines[0] not in promptish:
-        first = promptish[0]
-        stem_lines = [first] + [x for x in stem_lines if x != first]
-
     return "\n".join(stem_lines).strip(), options
 
 def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[List[Question], Dict[int, bytes]]:
+    """Web v1.3 question parser."""
     doc = fitz.open(stream=question_pdf, filetype="pdf")
     page_images = {}
     for pi, page in enumerate(doc, start=1):
@@ -212,8 +228,8 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
     full_text = "\n".join(page.get_text("text") for page in doc)
     groups = []
     for m in re.finditer(r"回答\s*(\d{1,2})\s*[～~\-至]\s*(\d{1,2})\s*題", full_text):
-        a,b=int(m.group(1)),int(m.group(2))
-        if a<=b:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a <= b:
             groups.append((a,b))
 
     starts = _sequential_question_starts(doc, expected_count)
@@ -223,6 +239,7 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
         qno, pi = s["qno"], s["page"]
         page = doc[pi-1]
         y0 = max(0, s["bbox"][1]-6)
+
         y1 = page.rect.height - 35
         for later in starts[idx+1:]:
             if later["page"] == pi:
@@ -232,6 +249,7 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
                 break
 
         stem, options = _region_text_and_options(page, y0, y1, qno)
+
         crop_rect = fitz.Rect(0, y0, page.rect.width, min(page.rect.height, y1))
         cpix = page.get_pixmap(matrix=fitz.Matrix(1.5,1.5), clip=crop_rect, alpha=False)
         crop = cpix.tobytes("png")
@@ -243,11 +261,17 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
                 visual = True
                 break
 
-        q = Question(source_no=qno, page_no=pi, text=stem, options=options,
-                     crop_png=crop, visual_mode=visual)
+        q = Question(
+            source_no=qno,
+            page_no=pi,
+            text=stem,
+            options=options,
+            crop_png=crop,
+            visual_mode=visual
+        )
         for a,b in groups:
             if a <= qno <= b:
-                q.group_id=f"{a}-{b}"
+                q.group_id = f"{a}-{b}"
                 break
         questions.append(q)
 
