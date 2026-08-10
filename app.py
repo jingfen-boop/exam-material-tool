@@ -17,7 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v1.5"
+APP_VERSION = "Web v1.6"
 
 # -----------------------------
 # Models
@@ -40,11 +40,16 @@ class Question:
     crop_png: bytes = b""
     visual_mode: bool = False
     reviewed: bool = False
+    layout_style: str = "一般直列"
+    include_image: bool = True
+    image_pngs: list = None
     selected: bool = True
 
     def __post_init__(self):
         if self.options is None:
             self.options = {}
+        if self.image_pngs is None:
+            self.image_pngs = []
 
 # -----------------------------
 # PDF parsing
@@ -257,11 +262,21 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
         crop = cpix.tobytes("png")
 
         visual = False
+        image_pngs = []
         d = page.get_text("dict")
         for block in d.get("blocks", []):
-            if block.get("type") == 1 and fitz.Rect(block.get("bbox")).intersects(crop_rect):
-                visual = True
-                break
+            if block.get("type") != 1:
+                continue
+            br = fitz.Rect(block.get("bbox"))
+            if not br.intersects(crop_rect):
+                continue
+            # Ignore tiny decorative fragments.
+            if br.width < 25 or br.height < 20 or br.width * br.height < 1200:
+                continue
+            visual = True
+            data = block.get("image")
+            if data:
+                image_pngs.append(data)
 
         q = Question(
             source_no=qno,
@@ -269,7 +284,8 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
             text=stem,
             options=options,
             crop_png=crop,
-            visual_mode=visual
+            visual_mode=visual,
+            image_pngs=image_pngs
         )
         for a,b in groups:
             if a <= qno <= b:
@@ -530,6 +546,153 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
     spacer = doc.add_paragraph()
     spacer.paragraph_format.space_after = Pt(2)
 
+def _add_editable_options(doc, q: Question, two_columns=False):
+    keys = ["A", "B", "C", "D"]
+    if two_columns:
+        table = doc.add_table(rows=2, cols=2)
+        table.autofit = False
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for idx, key in enumerate(keys):
+            cell = table.cell(idx // 2, idx % 2)
+            p = cell.paragraphs[0]
+            r = p.add_run(f"({key}) {q.options.get(key, '')}")
+            set_eastasia(r)
+            r.font.size = Pt(10.5)
+        # Remove table borders for exam-like appearance.
+        tblPr = table._tbl.tblPr
+        borders = OxmlElement("w:tblBorders")
+        for edge in ("top","left","bottom","right","insideH","insideV"):
+            el = OxmlElement(f"w:{edge}")
+            el.set(qn("w:val"), "nil")
+            borders.append(el)
+        tblPr.append(borders)
+    else:
+        for key in keys:
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Cm(0.7)
+            p.paragraph_format.space_after = Pt(1)
+            r = p.add_run(f"({key}) {q.options.get(key, '')}")
+            set_eastasia(r)
+            r.font.size = Pt(10.5)
+
+def _add_first_image_to_cell(cell, q: Question, width_cm=6.3):
+    if not q.include_image or not q.image_pngs:
+        return
+    try:
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(io.BytesIO(q.image_pngs[0]), width=Cm(width_cm))
+    except Exception:
+        pass
+
+def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False):
+    """
+    Editable-first output:
+    - all extracted/manually corrected text is real Word text;
+    - non-text visual material is inserted as image files;
+    - layout approximates the original exam with a small set of reusable templates.
+    """
+    style = q.layout_style or "一般直列"
+
+    if q.material.strip():
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(2)
+        p.paragraph_format.space_after = Pt(4)
+        r = p.add_run(q.material)
+        set_eastasia(r)
+        r.font.size = Pt(10.5)
+
+    if style == "圖片在右" and q.include_image and q.image_pngs:
+        table = doc.add_table(rows=1, cols=2)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+        table.columns[0].width = Cm(10.7)
+        table.columns[1].width = Cm(6.4)
+
+        c0, c1 = table.cell(0,0), table.cell(0,1)
+        p = c0.paragraphs[0]
+        r = p.add_run(f"（{' ' + q.answer + ' ' if teacher and q.answer else '   '}）{display_no}. {q.text}")
+        set_eastasia(r)
+        r.font.size = Pt(10.5)
+        _add_first_image_to_cell(c1, q, width_cm=5.9)
+
+        tblPr = table._tbl.tblPr
+        borders = OxmlElement("w:tblBorders")
+        for edge in ("top","left","bottom","right","insideH","insideV"):
+            el = OxmlElement(f"w:{edge}")
+            el.set(qn("w:val"), "nil")
+            borders.append(el)
+        tblPr.append(borders)
+    else:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(2)
+        p.paragraph_format.space_after = Pt(2)
+        r = p.add_run(f"（{' ' + q.answer + ' ' if teacher and q.answer else '   '}）{display_no}. {q.text}")
+        set_eastasia(r)
+        r.font.size = Pt(10.5)
+
+        if style == "圖片在上" and q.include_image and q.image_pngs:
+            ip = doc.add_paragraph()
+            ip.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            try:
+                ip.add_run().add_picture(io.BytesIO(q.image_pngs[0]), width=Cm(14.8))
+            except Exception:
+                pass
+
+    # If there are additional images, preserve them below the stem.
+    if q.include_image and len(q.image_pngs) > 1:
+        for data in q.image_pngs[1:]:
+            ip = doc.add_paragraph()
+            ip.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            try:
+                ip.add_run().add_picture(io.BytesIO(data), width=Cm(13.5))
+            except Exception:
+                pass
+
+    _add_editable_options(doc, q, two_columns=(style == "選項兩欄"))
+
+    if teacher:
+        p = doc.add_paragraph()
+        r = p.add_run("解析：\n")
+        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        r2 = p.add_run(q.explanation or "（待補）")
+        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+        p = doc.add_paragraph()
+        r = p.add_run("【教學步驟】：\n")
+        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        r2 = p.add_run(q.teaching or "（待補）")
+        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+        if q.note_strategy.strip():
+            p = doc.add_paragraph()
+            r = p.add_run("【筆記策略】：\n")
+            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            r2 = p.add_run(q.note_strategy)
+            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(3)
+
+def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str, teacher=False) -> bytes:
+    doc = Document()
+    setup_exam_style_doc(doc)
+    title = f"{year}會考國文題本-{title_suffix}"
+    add_exam_style_header(doc, title)
+
+    p = doc.add_paragraph()
+    r = p.add_run("壹、單題")
+    set_eastasia(r)
+    r.bold = True
+
+    selected = [q for q in questions if q.selected]
+    for i, q in enumerate(selected, start=1):
+        add_editable_exam_question(doc, q, i, teacher=teacher)
+
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
 def make_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
                           teacher=False, show_new_number=False,
                           show_source_meta=False) -> bytes:
@@ -720,8 +883,23 @@ with tab1:
                 value=rq.group_id,
                 key=f"review_group_{review_no}"
             )
+            layout_choices = ["一般直列", "圖片在右", "圖片在上", "選項兩欄"]
+            current_layout = rq.layout_style if rq.layout_style in layout_choices else "一般直列"
+            layout_edit = st.selectbox(
+                "可編輯 Word 版型",
+                layout_choices,
+                index=layout_choices.index(current_layout),
+                key=f"review_layout_{review_no}",
+                help="一般直列適合純文字題；圖片在右適合題幹左、圖右；圖片在上適合大型圖表；選項兩欄適合短選項。"
+            )
+            include_image_edit = st.checkbox(
+                "可編輯版輸出獨立圖片",
+                value=rq.include_image,
+                key=f"review_include_image_{review_no}",
+                help="若原圖本身含有大量文字且你已手動把文字重建到題幹/選項，可取消，以避免文字重複。"
+            )
             visual_edit = st.checkbox(
-                "Word 輸出時優先保留原 PDF 裁圖",
+                "保留原 PDF 裁圖作為備用／原版型輸出",
                 value=rq.visual_mode,
                 key=f"review_visual_{review_no}"
             )
@@ -736,6 +914,8 @@ with tab1:
                     rq, material_edit, stem_edit, oa, ob, oc, od,
                     group_edit, visual_edit, reviewed_edit
                 )
+                rq.layout_style = layout_edit
+                rq.include_image = include_image_edit
                 st.success(f"第 {rq.source_no} 題已儲存。")
                 st.rerun()
 
@@ -842,13 +1022,31 @@ with tab4:
 
         output_mode = st.radio(
             "Word 題本版型",
-            ["原會考版型（推薦）", "可編輯文字版"],
+            ["可編輯原會考風格（推薦）", "原 PDF 圖像版", "一般可編輯文字版"],
             horizontal=True,
-            help="原會考版型：每題保留原 PDF 題目區塊，最適合人物對話、圖片、表格與特殊排版。可編輯文字版：一般題幹與選項可在 Word 編輯。"
+            help="可編輯原會考風格：文字可編輯、圖片獨立插入並套用近似版型。原 PDF 圖像版：最像原卷但題目文字不可編輯。一般可編輯文字版：版面較簡化。"
         )
         suffix = st.text_input("題本標題後綴", value="通過率篩選題本")
 
-        if output_mode == "原會考版型（推薦）":
+        if output_mode == "可編輯原會考風格（推薦）":
+            st.info("此模式把題幹、閱讀材料與 A–D 轉成真正的 Word 文字，圖片則以獨立圖檔插入；並使用「一般直列／圖片在右／圖片在上／選項兩欄」等版型盡量模仿原會考排版。")
+            incomplete = [q.source_no for q in selected if len(q.options) < 4]
+            if incomplete:
+                st.warning("以下題目尚未有完整 A–D 可編輯文字：" + "、".join(map(str, incomplete)) + "。請先到①題目結構校對補齊，否則 Word 會出現空白選項。")
+            student_bytes = make_editable_exam_layout_docx(
+                st.session_state.questions,
+                int(st.session_state.year),
+                suffix,
+                teacher=False
+            )
+            teacher_bytes = make_editable_exam_layout_docx(
+                st.session_state.questions,
+                int(st.session_state.year),
+                suffix+"(詳解_教學法)",
+                teacher=True
+            )
+
+        elif output_mode == "原 PDF 圖像版":
             st.info("此模式以原 PDF 題目區塊作為圖檔放入 Word，因此視覺最接近原會考題本；圖內文字本身不可直接編輯。詳解與教學文字仍是可編輯 Word 文字。")
             show_new_number = st.checkbox(
                 "在每題上方另外顯示新的組題序號（1、2、3…）",
@@ -919,6 +1117,7 @@ with tab4:
         for q in st.session_state.questions:
             d = asdict(q)
             d["crop_png"] = ""
+            d["image_pngs"] = []
             project.append(d)
         project_json = json.dumps({
             "version": APP_VERSION,
