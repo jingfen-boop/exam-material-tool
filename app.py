@@ -18,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.8 淨化空白段落＋自然分頁"
+APP_VERSION = "Web v2.9 短題防拆頁＋自然分頁"
 
 # -----------------------------
 # Models
@@ -713,6 +713,94 @@ def _remove_empty_body_paragraphs(doc):
         if not has_text and not has_drawing and not has_pagebreak:
             body.remove(p)
 
+
+def _question_is_short_for_keep(q: Question) -> bool:
+    """Only compact ordinary text questions are kept on one page.
+    Long material questions and image-heavy questions remain naturally pageable.
+    """
+    if _effective_render_mode(q) == "整題圖像":
+        return False
+    if q.include_image and q.image_pngs:
+        return False
+
+    material = _clean_word_text(q.material)
+    stem = _clean_word_text(q.text)
+    options = [_clean_word_text(q.options.get(k, "")) for k in ("A", "B", "C", "D")]
+
+    # Conservative threshold: intended for questions like the observed Q5.
+    total_chars = len(material) + len(stem) + sum(len(x) for x in options)
+    nonempty_opts = sum(bool(x) for x in options)
+    return (not material) and nonempty_opts >= 3 and total_chars <= 260
+
+def _wrap_body_elements_in_keep_table(doc, start_index: int):
+    """Wrap newly-added question body elements in a borderless 1-cell table.
+    Word will keep the row together when it fits on one page. If it does not fit,
+    Word may move the entire short question to the next page.
+    """
+    body = doc._element.body
+    children = list(body)
+    new_children = children[start_index:]
+    # Exclude sectPr from moving.
+    new_children = [el for el in new_children if el.tag != qn("w:sectPr")]
+    if not new_children:
+        return
+
+    tbl = OxmlElement("w:tbl")
+    tblPr = OxmlElement("w:tblPr")
+    tblW = OxmlElement("w:tblW")
+    tblW.set(qn("w:w"), "0")
+    tblW.set(qn("w:type"), "auto")
+    tblPr.append(tblW)
+
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        e = OxmlElement("w:" + edge)
+        e.set(qn("w:val"), "nil")
+        borders.append(e)
+    tblPr.append(borders)
+
+    cellMar = OxmlElement("w:tblCellMar")
+    for edge in ("top", "left", "bottom", "right"):
+        m = OxmlElement("w:" + edge)
+        m.set(qn("w:w"), "0")
+        m.set(qn("w:type"), "dxa")
+        cellMar.append(m)
+    tblPr.append(cellMar)
+    tbl.append(tblPr)
+
+    tr = OxmlElement("w:tr")
+    trPr = OxmlElement("w:trPr")
+    cantSplit = OxmlElement("w:cantSplit")
+    trPr.append(cantSplit)
+    tr.append(trPr)
+
+    tc = OxmlElement("w:tc")
+    tcPr = OxmlElement("w:tcPr")
+    tcW = OxmlElement("w:tcW")
+    tcW.set(qn("w:w"), "0")
+    tcW.set(qn("w:type"), "auto")
+    tcPr.append(tcW)
+    tc.append(tcPr)
+
+    # Move generated paragraphs/images into the cell.
+    for el in new_children:
+        body.remove(el)
+        tc.append(el)
+
+    # Word requires a final paragraph in a cell.
+    if not list(tc) or list(tc)[-1].tag != qn("w:p"):
+        tc.append(OxmlElement("w:p"))
+
+    tr.append(tc)
+    tbl.append(tr)
+
+    # Insert before sectPr if present.
+    sectPr = body.find(qn("w:sectPr"))
+    if sectPr is not None:
+        body.insert(list(body).index(sectPr), tbl)
+    else:
+        body.append(tbl)
+
 def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False):
     material_text = _clean_word_text(q.material)
     stem_text = _clean_word_text(q.text)
@@ -942,7 +1030,13 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
         if mode == "整題圖像":
             add_full_image_exam_question(doc, q, i, teacher=teacher)
         else:
+            keep_short = _question_is_short_for_keep(q)
+            body = doc._element.body
+            sectPr = body.find(qn("w:sectPr"))
+            start_index = list(body).index(sectPr) if sectPr is not None else len(list(body))
             add_editable_exam_question(doc, q, i, teacher=teacher)
+            if keep_short:
+                _wrap_body_elements_in_keep_table(doc, start_index)
 
     out = io.BytesIO()
     _remove_empty_body_paragraphs(doc)
