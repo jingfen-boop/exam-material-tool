@@ -18,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.6 穩定分頁＋文意統整"
+APP_VERSION = "Web v2.7 緊湊自然分頁＋文意統整"
 
 # -----------------------------
 # Models
@@ -540,7 +540,7 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
     if q.crop_png:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(3)
+        p.paragraph_format.space_after = Pt(1.5)
         p.add_run().add_picture(io.BytesIO(q.crop_png), width=Cm(17.7))
     else:
         # Fallback only when a crop is unavailable.
@@ -549,7 +549,7 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
     if show_source_meta:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(3)
+        p.paragraph_format.space_after = Pt(1.5)
         r = p.add_run(f"原題：{q.source_no}｜通過率：{q.pass_rate if q.pass_rate is not None else '—'}")
         set_eastasia(r)
         r.font.size = Pt(8)
@@ -673,9 +673,9 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
             # Preserve aspect ratio and keep within the usable A4 text width.
             im = Image.open(io.BytesIO(data))
             w, h = im.size
-            max_w = 16.2
-            # Use more of the printable width while preserving aspect ratio.
-            target_w = min(max_w, max(13.5, max_w if w >= 750 else 15.2))
+            max_w = 16.0
+            # Compact natural-flow width; preserve aspect ratio and avoid forced page gaps.
+            target_w = min(max_w, max(12.8, max_w if w >= 900 else 14.8))
             pimg.add_run().add_picture(io.BytesIO(data), width=Cm(target_w))
         except Exception:
             pass
@@ -735,7 +735,7 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
     else:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(2)
-        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.space_after = Pt(1)
         r = p.add_run(f"（{' ' + q.answer + ' ' if teacher and q.answer else '   '}）{display_no}. {q.text}")
         set_eastasia(r)
         r.font.size = Pt(10.5)
@@ -911,18 +911,10 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
         set_eastasia(r)
         r.bold = True
 
-    # Stable pagination: explicit page breaks only BETWEEN questions.
-    # No keep_with_next/keep_together flags are used, so Word will not show
-    # the black square pagination marks seen in v2.5.
-    used_lines = 9.0   # title + name table + section heading on page 1
-    first_page = True
+    # v2.7 compact natural pagination:
+    # Do not estimate or reserve an entire question's height.
+    # Word is allowed to flow naturally, preventing large blank areas.
     for i, q in enumerate(selected, start=1):
-        used_lines, did_break = _add_stable_page_break_if_needed(
-            doc, q, used_lines, first_page
-        )
-        if did_break:
-            first_page = False
-
         mode = _effective_render_mode(q)
         if mode == "整題圖像":
             add_full_image_exam_question(doc, q, i, teacher=teacher)
