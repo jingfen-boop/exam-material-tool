@@ -2,6 +2,7 @@
 import io
 import os
 import re
+import base64
 import json
 import zipfile
 from dataclasses import dataclass, asdict
@@ -17,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v1.6"
+APP_VERSION = "Web v1.7"
 
 # -----------------------------
 # Models
@@ -741,6 +742,98 @@ def make_docx(questions: List[Question], year: int, title_suffix: str, teacher=F
     doc.save(out)
     return out.getvalue()
 
+
+def _json_from_model_text(txt: str):
+    txt = (txt or "").strip()
+    txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.S)
+    return json.loads(txt)
+
+def ai_structure_question_from_crop(q: Question, api_key: str, model: str):
+    """
+    Use the original PDF crop as a visual source to reconstruct editable structure.
+    Best for dialogue balloons, image-based choices, tables, or questions where
+    PDF text extraction produced fewer than four options.
+    """
+    if not q.crop_png:
+        raise ValueError("本題沒有原 PDF 裁圖可供辨識。")
+
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+
+    b64 = base64.b64encode(q.crop_png).decode("ascii")
+    image_url = f"data:image/png;base64,{b64}"
+
+    prompt = f"""
+你是臺灣國中教育會考國文題本的版面結構化助手。
+請只根據這張「第 {q.source_no} 題原 PDF 裁圖」辨識文字與結構，不要改寫題目。
+官方答案為：{q.answer or "未知"}。
+
+任務：
+1. 將共用資料、引文、閱讀材料放在 material。
+2. 將真正詢問學生的句子放在 stem。
+3. 將 A、B、C、D 的文字完整逐字放入 options。
+4. 若選項文字位於人物對話框、圖片或圖表內，也請辨識為可編輯文字。
+5. 判斷最接近原版面的 layout_style，只能選：
+   一般直列、圖片在右、圖片在上、選項兩欄。
+6. visual_description 簡述仍需保留為圖片的非文字視覺元素，例如人物、器物、圖表、古文字圖形；不要把可編輯文字列入此欄。
+7. 不確定的字不要猜，請以【待確認】標示。
+8. 不要加入解析、答案說明或額外知識。
+
+只回傳 JSON：
+{{
+  "material": "",
+  "stem": "",
+  "options": {{
+    "A": "",
+    "B": "",
+    "C": "",
+    "D": ""
+  }},
+  "layout_style": "一般直列",
+  "visual_description": "",
+  "confidence": "high|medium|low"
+}}
+"""
+    resp = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_url": image_url, "detail": "high"},
+                ],
+            }
+        ],
+    )
+    data = _json_from_model_text(resp.output_text)
+    return data
+
+def apply_ai_structure(q: Question, data: dict):
+    opts = data.get("options") or {}
+    q.material = (data.get("material") or "").strip()
+    q.text = (data.get("stem") or "").strip()
+    q.options = {
+        "A": (opts.get("A") or "").strip(),
+        "B": (opts.get("B") or "").strip(),
+        "C": (opts.get("C") or "").strip(),
+        "D": (opts.get("D") or "").strip(),
+    }
+    style = data.get("layout_style") or "一般直列"
+    if style not in ["一般直列", "圖片在右", "圖片在上", "選項兩欄"]:
+        style = "一般直列"
+    q.layout_style = style
+    # AI structure is still a draft; human must confirm.
+    q.reviewed = False
+    return data.get("confidence", "medium"), data.get("visual_description", "")
+
+def _needs_structure_ai(q: Question):
+    if len([v for v in q.options.values() if (v or "").strip()]) < 4:
+        return True
+    # Materials embedded in stem often benefit from a clean split.
+    markers = ["【資料", "資料一", "資料二", "請閱讀", "根據以上資料"]
+    return any(m in (q.text or "") for m in markers) and not q.material.strip()
+
 # -----------------------------
 # AI generation
 # -----------------------------
@@ -770,9 +863,7 @@ def ai_generate(q: Question, api_key: str, model: str):
 }}
 """
     resp = client.responses.create(model=model, input=prompt)
-    txt = resp.output_text.strip()
-    txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.S)
-    return json.loads(txt)
+    return _json_from_model_text(resp.output_text)
 
 # -----------------------------
 # Streamlit UI
@@ -794,7 +885,7 @@ with st.sidebar:
     st.subheader("AI（選用）")
     api_key = st.text_input("OpenAI API Key", type="password", help="不填也能建立題庫、篩題與輸出 Word。")
     model = st.text_input("模型", value="gpt-5")
-    st.caption("API Key 只存在目前瀏覽器工作階段，不會寫入輸出檔。")
+    st.caption("API Key 只存在目前瀏覽器工作階段，不會寫入輸出檔。AI 可用於詳解，也可辨識圖片型題目的可編輯文字結構。")
 
 tab1, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 篩選組題", "③ 編輯詳解", "④ 產生 Word"])
 
@@ -843,6 +934,34 @@ with tab1:
                 "題幹預覽": q.text[:55].replace("\n"," ")
             })
         st.dataframe(data, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("### AI 自動結構化（選用）")
+        st.caption("適合第3題這類「選項文字在人物對話框／圖片裡」或選項未抓完整的題目。AI 會讀取原 PDF 裁圖，轉成可編輯的材料、題幹與 A–D；產出後仍需人工確認。")
+        need_ai = [q.source_no for q in st.session_state.questions if _needs_structure_ai(q)]
+        st.write("目前建議 AI 結構化題號：" + ("、".join(map(str, need_ai)) if need_ai else "無"))
+
+        ai_c1, ai_c2 = st.columns(2)
+        with ai_c1:
+            if st.button("AI 結構化目前所有異常題", disabled=not api_key or not need_ai):
+                done, failed = [], []
+                prog = st.progress(0)
+                for idx, qno_ai in enumerate(need_ai, start=1):
+                    q_ai = next(x for x in st.session_state.questions if x.source_no == qno_ai)
+                    try:
+                        result_ai = ai_structure_question_from_crop(q_ai, api_key, model)
+                        apply_ai_structure(q_ai, result_ai)
+                        done.append(qno_ai)
+                    except Exception as e:
+                        failed.append((qno_ai, str(e)))
+                    prog.progress(idx / len(need_ai))
+                if done:
+                    st.success("已完成 AI 結構化：" + "、".join(map(str, done)) + "。請逐題人工確認。")
+                if failed:
+                    st.error("以下題目失敗：" + "；".join(f"{n}:{msg}" for n,msg in failed))
+                st.rerun()
+        with ai_c2:
+            st.caption("若未填 OpenAI API Key，此功能不會啟用；原本的手動校對與 Word 輸出仍可使用。")
 
         st.divider()
         st.markdown("### 題目結構校對")
@@ -908,6 +1027,18 @@ with tab1:
                 value=rq.reviewed,
                 key=f"review_done_{review_no}"
             )
+
+            if st.button("✨ AI 從原 PDF 裁圖重新辨識本題", disabled=not api_key, key=f"ai_structure_{review_no}"):
+                try:
+                    with st.spinner("正在辨識題目圖片中的材料、題幹與選項…"):
+                        result_struct = ai_structure_question_from_crop(rq, api_key, model)
+                        confidence, visual_desc = apply_ai_structure(rq, result_struct)
+                    st.success(f"AI 結構化完成（信心：{confidence}）。請核對後再勾選「本題內容已人工確認」。")
+                    if visual_desc:
+                        st.info("仍需保留的視覺元素：" + visual_desc)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"AI 結構化失敗：{e}")
 
             if st.button("💾 儲存本題校對", type="primary", key=f"save_review_{review_no}"):
                 _apply_structure_edit(
@@ -1032,7 +1163,7 @@ with tab4:
             st.info("此模式把題幹、閱讀材料與 A–D 轉成真正的 Word 文字，圖片則以獨立圖檔插入；並使用「一般直列／圖片在右／圖片在上／選項兩欄」等版型盡量模仿原會考排版。")
             incomplete = [q.source_no for q in selected if len(q.options) < 4]
             if incomplete:
-                st.warning("以下題目尚未有完整 A–D 可編輯文字：" + "、".join(map(str, incomplete)) + "。請先到①題目結構校對補齊，否則 Word 會出現空白選項。")
+                st.warning("以下題目尚未有完整 A–D 可編輯文字：" + "、".join(map(str, incomplete)) + "。請先到①題目結構校對，使用「AI 從原 PDF 裁圖重新辨識本題」或人工補齊。")
             student_bytes = make_editable_exam_layout_docx(
                 st.session_state.questions,
                 int(st.session_state.year),
