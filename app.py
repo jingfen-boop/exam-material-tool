@@ -18,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.7 緊湊自然分頁＋文意統整"
+APP_VERSION = "Web v2.8 淨化空白段落＋自然分頁"
 
 # -----------------------------
 # Models
@@ -694,7 +694,30 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
 
+
+def _clean_word_text(value) -> str:
+    if value is None:
+        return ""
+    s = str(value).replace("\u00a0", " ").replace("\u3000", " ")
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n[ \t]*\n+", "\n", s)
+    return s.strip()
+
+def _remove_empty_body_paragraphs(doc):
+    body = doc._element.body
+    for p in list(body.findall(qn("w:p"))):
+        has_text = any((t.text or "").strip() for t in p.findall(".//" + qn("w:t")))
+        has_drawing = bool(p.findall(".//" + qn("w:drawing")))
+        has_pagebreak = any(br.get(qn("w:type")) == "page"
+                            for br in p.findall(".//" + qn("w:br")))
+        if not has_text and not has_drawing and not has_pagebreak:
+            body.remove(p)
+
 def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False):
+    material_text = _clean_word_text(q.material)
+    stem_text = _clean_word_text(q.text)
+    clean_options = {k: _clean_word_text(q.options.get(k, "")) for k in ("A", "B", "C", "D")}
+
     """
     Editable-first output:
     - all extracted/manually corrected text is real Word text;
@@ -703,7 +726,7 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
     """
     style = q.layout_style or "一般直列"
 
-    if q.material.strip():
+    if material_text:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(2)
         p.paragraph_format.space_after = Pt(4)
@@ -922,6 +945,7 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
             add_editable_exam_question(doc, q, i, teacher=teacher)
 
     out = io.BytesIO()
+    _remove_empty_body_paragraphs(doc)
     doc.save(out)
     return out.getvalue()
 
@@ -953,6 +977,7 @@ def make_exam_layout_docx(questions: List[Question], year: int, title_suffix: st
         )
 
     out = io.BytesIO()
+    _remove_empty_body_paragraphs(doc)
     doc.save(out)
     return out.getvalue()
 
@@ -971,6 +996,7 @@ def make_docx(questions: List[Question], year: int, title_suffix: str, teacher=F
         add_question(doc, q, i, year, teacher=teacher, use_crop=use_crop)
 
     out = io.BytesIO()
+    _remove_empty_body_paragraphs(doc)
     doc.save(out)
     return out.getvalue()
 
