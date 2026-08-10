@@ -17,7 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.0 快速選題"
+APP_VERSION = "Web v2.1 題本排版修正版"
 
 # -----------------------------
 # Models
@@ -628,42 +628,36 @@ def _add_first_image_to_cell(cell, q: Question, width_cm=6.3):
 
 def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=False):
     """
-    Editable answer bracket + editable NEW number, with the rest of the source question
-    preserved as an image. The original source number is erased in body_crop_png.
+    Full-image question mode:
+    - editable answer bracket and NEW question number
+    - source question body preserved as a near-full-width image
+    - original source number erased in body_crop_png
+    - no side-by-side table, so the image cannot be pushed to the right or clipped
     """
-    table = doc.add_table(rows=1, cols=2)
-    table.alignment = WD_TABLE_ALIGNMENT.LEFT
-    table.autofit = False
-    table.columns[0].width = Cm(2.0)
-    table.columns[1].width = Cm(15.8)
-
-    c0, c1 = table.cell(0,0), table.cell(0,1)
-    p0 = c0.paragraphs[0]
-    p0.paragraph_format.space_after = Pt(0)
+    p = doc.add_paragraph()
+    p.paragraph_format.left_indent = Cm(0)
+    p.paragraph_format.first_line_indent = Cm(0)
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(2)
     answer_text = q.answer if teacher and q.answer else "　"
-    r0 = p0.add_run(f"（{answer_text}）{display_no}.")
-    set_eastasia(r0)
-    r0.font.size = Pt(10.5)
+    r = p.add_run(f"（{answer_text}）{display_no}.")
+    set_eastasia(r)
+    r.font.size = Pt(10.5)
     if teacher and q.answer:
-        r0.font.color.rgb = RGBColor(255,0,0)
+        r.font.color.rgb = RGBColor(255,0,0)
 
     data = q.body_crop_png or q.crop_png
     if data:
-        p1 = c1.paragraphs[0]
-        p1.paragraph_format.space_after = Pt(0)
+        pimg = doc.add_paragraph()
+        pimg.paragraph_format.left_indent = Cm(0.75)
+        pimg.paragraph_format.right_indent = Cm(0)
+        pimg.paragraph_format.space_before = Pt(0)
+        pimg.paragraph_format.space_after = Pt(3)
         try:
-            p1.add_run().add_picture(io.BytesIO(data), width=Cm(15.5))
+            # A4 text area is about 17 cm in this document. Keep image comfortably inside it.
+            pimg.add_run().add_picture(io.BytesIO(data), width=Cm(15.8))
         except Exception:
             pass
-
-    # Remove borders.
-    tblPr = table._tbl.tblPr
-    borders = OxmlElement("w:tblBorders")
-    for edge in ("top","left","bottom","right","insideH","insideV"):
-        el = OxmlElement(f"w:{edge}")
-        el.set(qn("w:val"), "nil")
-        borders.append(el)
-    tblPr.append(borders)
 
     if teacher:
         p = doc.add_paragraph()
@@ -678,8 +672,6 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
         r2 = p.add_run(q.teaching or "（待補）")
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
-    spacer = doc.add_paragraph()
-    spacer.paragraph_format.space_after = Pt(3)
 
 def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False):
     """
@@ -1222,7 +1214,7 @@ with tab4:
         suffix = st.text_input("題本標題後綴", value="通過率篩選題本")
 
         if output_mode == "可編輯原會考風格（推薦）":
-            st.info("此模式會依每題設定自動混合輸出：一般題用可編輯文字；圖文題用文字＋獨立圖片；特殊版面題可用「整題圖像」，但（　）與新的組題題號仍是可編輯文字。")
+            st.info("此模式會依每題設定自動混合輸出：一般題用可編輯文字；圖文題用文字＋獨立圖片；特殊版面題可用「整題圖像」；（　）與新的組題題號仍是可編輯文字，題圖會改為正文寬度置於題號下方，不再塞在右欄。")
             incomplete = [q.source_no for q in selected if _effective_render_mode(q) != "整題圖像" and len([v for v in q.options.values() if (v or "").strip()]) < 4]
             if incomplete:
                 st.warning("以下非「整題圖像」題目尚未有完整 A–D：" + "、".join(map(str, incomplete)) + "。可補齊文字，或到①題目結構校對改成「整題圖像」。")
