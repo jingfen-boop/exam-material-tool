@@ -17,7 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v1.4"
+APP_VERSION = "Web v1.5"
 
 # -----------------------------
 # Models
@@ -434,6 +434,132 @@ def add_question(doc, q: Question, display_no: int, year: int, teacher=False, us
 
     doc.add_paragraph()
 
+def setup_exam_style_doc(doc: Document):
+    """A4 exam-like page with restrained margins and no worksheet metadata."""
+    sec = doc.sections[0]
+    sec.page_width = Cm(21)
+    sec.page_height = Cm(29.7)
+    sec.top_margin = Cm(1.35)
+    sec.bottom_margin = Cm(1.35)
+    sec.left_margin = Cm(1.45)
+    sec.right_margin = Cm(1.45)
+    normal = doc.styles["Normal"]
+    normal.font.name = "Microsoft JhengHei"
+    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft JhengHei")
+    normal.font.size = Pt(11)
+
+def add_exam_style_header(doc, title):
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_after = Pt(4)
+    r = p.add_run(title)
+    set_eastasia(r)
+    r.bold = True
+    r.font.size = Pt(16)
+
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p.paragraph_format.space_after = Pt(7)
+    r = p.add_run("姓名：____________________")
+    set_eastasia(r)
+    r.font.size = Pt(10)
+
+def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
+                             show_new_number=False, show_source_meta=False):
+    """
+    Preserve the original PDF question block as an image.
+    This is the safest way to retain dialogue balloons, tables, figures,
+    vertical text and other official-exam visual layout.
+    """
+    if show_new_number:
+        pno = doc.add_paragraph()
+        pno.paragraph_format.space_before = Pt(2)
+        pno.paragraph_format.space_after = Pt(2)
+        r = pno.add_run(f"{display_no}.")
+        set_eastasia(r)
+        r.bold = True
+        r.font.size = Pt(11)
+
+    if q.crop_png:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(3)
+        p.add_run().add_picture(io.BytesIO(q.crop_png), width=Cm(17.7))
+    else:
+        # Fallback only when a crop is unavailable.
+        add_question(doc, q, display_no, 0, teacher=False, use_crop=False)
+
+    if show_source_meta:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(3)
+        r = p.add_run(f"原題：{q.source_no}｜通過率：{q.pass_rate if q.pass_rate is not None else '—'}")
+        set_eastasia(r)
+        r.font.size = Pt(8)
+
+    if teacher:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(2)
+        r = p.add_run(f"答案：{q.answer or '—'}")
+        set_eastasia(r)
+        r.bold = True
+        r.font.color.rgb = RGBColor(255,0,0)
+
+        box = doc.add_table(rows=1, cols=1)
+        box.style = "Table Grid"
+        cell = box.cell(0,0)
+        p = cell.paragraphs[0]
+        r = p.add_run("解析：\n")
+        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        r2 = p.add_run(q.explanation or "（待補）")
+        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+        p = cell.add_paragraph()
+        r = p.add_run("【教學步驟】：\n")
+        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        r2 = p.add_run(q.teaching or "（待補）")
+        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+        if q.note_strategy.strip():
+            p = cell.add_paragraph()
+            r = p.add_run("【筆記策略】：\n")
+            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            r2 = p.add_run(q.note_strategy)
+            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+    spacer = doc.add_paragraph()
+    spacer.paragraph_format.space_after = Pt(2)
+
+def make_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
+                          teacher=False, show_new_number=False,
+                          show_source_meta=False) -> bytes:
+    """
+    Original-layout mode: every selected item uses its source PDF crop.
+    This intentionally prioritizes visual fidelity over text editability.
+    """
+    doc = Document()
+    setup_exam_style_doc(doc)
+    title = f"{year}會考國文題本-{title_suffix}"
+    add_exam_style_header(doc, title)
+
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(5)
+    r = p.add_run("壹、單題")
+    set_eastasia(r)
+    r.bold = True
+
+    selected = [q for q in questions if q.selected]
+    for i, q in enumerate(selected, start=1):
+        add_source_crop_question(
+            doc, q, i, teacher=teacher,
+            show_new_number=show_new_number,
+            show_source_meta=show_source_meta
+        )
+
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
 def make_docx(questions: List[Question], year: int, title_suffix: str, teacher=False, preserve_visual=True) -> bytes:
     doc = Document()
     setup_doc(doc)
@@ -710,15 +836,66 @@ with tab4:
         st.write(f"目前選取：**{len(selected)} 題**")
         unreviewed = [q.source_no for q in selected if not q.reviewed]
         if unreviewed:
-            st.warning("目前選取題目中仍有未人工確認的題目：" + "、".join(map(str, unreviewed)) + "。仍可輸出，但建議先完成結構校對。")
+            st.warning("目前選取題目中仍有未人工確認的題目：" + "、".join(map(str, unreviewed)) + "。原版型輸出仍可保留原 PDF 題目外觀。")
         else:
             st.success("目前選取題目皆已完成結構校對。")
-        preserve_visual = st.checkbox("圖片／圖表／複雜題優先保留原 PDF 裁圖", value=True)
+
+        output_mode = st.radio(
+            "Word 題本版型",
+            ["原會考版型（推薦）", "可編輯文字版"],
+            horizontal=True,
+            help="原會考版型：每題保留原 PDF 題目區塊，最適合人物對話、圖片、表格與特殊排版。可編輯文字版：一般題幹與選項可在 Word 編輯。"
+        )
         suffix = st.text_input("題本標題後綴", value="通過率篩選題本")
+
+        if output_mode == "原會考版型（推薦）":
+            st.info("此模式以原 PDF 題目區塊作為圖檔放入 Word，因此視覺最接近原會考題本；圖內文字本身不可直接編輯。詳解與教學文字仍是可編輯 Word 文字。")
+            show_new_number = st.checkbox(
+                "在每題上方另外顯示新的組題序號（1、2、3…）",
+                value=False,
+                help="原裁圖可能仍含原始題號。若希望完全維持原卷外觀，建議不要勾選；若重組後需要新序號，可勾選。"
+            )
+            show_source_meta = st.checkbox(
+                "教師版顯示原題號／通過率來源資訊",
+                value=False
+            )
+
+            student_bytes = make_exam_layout_docx(
+                st.session_state.questions,
+                int(st.session_state.year),
+                suffix,
+                teacher=False,
+                show_new_number=show_new_number,
+                show_source_meta=False
+            )
+            teacher_bytes = make_exam_layout_docx(
+                st.session_state.questions,
+                int(st.session_state.year),
+                suffix+"(詳解_教學法)",
+                teacher=True,
+                show_new_number=show_new_number,
+                show_source_meta=show_source_meta
+            )
+        else:
+            preserve_visual = st.checkbox("圖片／圖表／複雜題保留原 PDF 裁圖", value=True)
+            st.caption("一般題目以可編輯文字輸出；圖片、圖表與複雜版面可保留原 PDF 裁圖。")
+            student_bytes = make_docx(
+                st.session_state.questions,
+                int(st.session_state.year),
+                suffix,
+                teacher=False,
+                preserve_visual=preserve_visual
+            )
+            teacher_bytes = make_docx(
+                st.session_state.questions,
+                int(st.session_state.year),
+                suffix+"(詳解_教學法)",
+                teacher=True,
+                preserve_visual=preserve_visual
+            )
 
         c1,c2 = st.columns(2)
         with c1:
-            student_bytes = make_docx(st.session_state.questions, int(st.session_state.year), suffix, teacher=False, preserve_visual=preserve_visual)
             st.download_button(
                 "⬇️ 下載學生題本 Word",
                 data=student_bytes,
@@ -728,7 +905,6 @@ with tab4:
                 use_container_width=True
             )
         with c2:
-            teacher_bytes = make_docx(st.session_state.questions, int(st.session_state.year), suffix+"(詳解_教學法)", teacher=True, preserve_visual=preserve_visual)
             st.download_button(
                 "⬇️ 下載詳解／教學法 Word",
                 data=teacher_bytes,
@@ -737,13 +913,12 @@ with tab4:
                 use_container_width=True
             )
 
-        # Export/import project JSON
         st.divider()
         st.markdown("#### 儲存工作進度")
         project = []
         for q in st.session_state.questions:
             d = asdict(q)
-            d["crop_png"] = ""  # JSON 不保存大型圖片，重新匯入 PDF 可再建 crop
+            d["crop_png"] = ""
             project.append(d)
         project_json = json.dumps({
             "version": APP_VERSION,
