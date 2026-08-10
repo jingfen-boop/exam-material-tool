@@ -1,5 +1,6 @@
 
 import io
+from pathlib import Path
 import os
 import re
 import json
@@ -17,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.2.1 修正版"
+APP_VERSION = "Web v2.3 範本套版"
 
 # -----------------------------
 # Models
@@ -782,18 +783,82 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(3)
 
-def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str, teacher=False) -> bytes:
-    doc = Document()
-    setup_exam_style_doc(doc)
-    title = (title_suffix or "").strip() or f"{year}年國中教育會考 國文科"
-    add_exam_style_header(doc, title)
 
-    p = doc.add_paragraph()
-    r = p.add_run("壹、單題")
-    set_eastasia(r)
-    r.bold = True
+def _zh_num(n: int) -> str:
+    digits = "零一二三四五六七八九"
+    if n < 10:
+        return digits[n]
+    if n < 20:
+        return "十" + (digits[n % 10] if n % 10 else "")
+    if n < 100:
+        return digits[n // 10] + "十" + (digits[n % 10] if n % 10 else "")
+    return str(n)
 
+def _template_path(kind: str, teacher: bool) -> Path:
+    base = Path(__file__).resolve().parent
+    mapping = {
+        ("八成以上", False): "template_80_student.docx",
+        ("八成以上", True): "template_80_teacher.docx",
+        ("六成至七成", False): "template_60_70_student.docx",
+        ("六成至七成", True): "template_60_70_teacher.docx",
+    }
+    return base / mapping[(kind, teacher)]
+
+def _load_clean_template(kind: str, teacher: bool, year: int, count: int):
+    """Load the user's real sample Word and retain its page/style/header area through 壹、單題."""
+    path = _template_path(kind, teacher)
+    if not path.exists():
+        return None
+    doc = Document(str(path))
+
+    # Update the real sample title but retain its formatting.
+    if doc.paragraphs:
+        p0 = doc.paragraphs[0]
+        old = p0.text
+        label = "通過率達八成以上" if kind == "八成以上" else "通過率達六成至七成"
+        new_title = f"{year}會考國文題本-{label}-題本（{_zh_num(count)}）"
+        if p0.runs:
+            p0.runs[0].text = new_title
+            for r in p0.runs[1:]:
+                r.text = ""
+        else:
+            p0.text = new_title
+
+    # Keep everything through the actual sample's "壹、單題", remove old sample questions.
+    body = doc._element.body
+    children = list(body)
+    keep_until = None
+    for i, child in enumerate(children):
+        if child.tag.endswith("}p"):
+            txt = "".join(child.itertext())
+            if "壹、單題" in txt:
+                keep_until = i
+                break
+    if keep_until is not None:
+        for child in children[keep_until + 1:]:
+            if child.tag.endswith("}sectPr"):
+                continue
+            body.remove(child)
+    return doc
+
+def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
+                                   teacher=False, template_kind="自訂簡版") -> bytes:
     selected = [q for q in questions if q.selected]
+
+    doc = None
+    if template_kind in ("八成以上", "六成至七成"):
+        doc = _load_clean_template(template_kind, teacher, year, len(selected))
+
+    if doc is None:
+        doc = Document()
+        setup_exam_style_doc(doc)
+        title = (title_suffix or "").strip() or f"{year}年國中教育會考 國文科"
+        add_exam_style_header(doc, title)
+        p = doc.add_paragraph()
+        r = p.add_run("壹、單題")
+        set_eastasia(r)
+        r.bold = True
+
     for i, q in enumerate(selected, start=1):
         mode = _effective_render_mode(q)
         if mode == "整題圖像":
@@ -804,6 +869,7 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
+
 
 def make_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
                           teacher=False, show_new_number=False,
@@ -1232,6 +1298,15 @@ with tab4:
             help="可編輯原會考風格：文字可編輯、圖片獨立插入並套用近似版型。原 PDF 圖像版：最像原卷但題目文字不可編輯。一般可編輯文字版：版面較簡化。"
         )
         suffix = st.text_input("學生題本標題", value=f"{int(st.session_state.year)}年國中教育會考 國文科", help="這裡會原樣成為 Word 頁首主標題，可直接改成你的正式範本標題。")
+        template_kind = st.radio(
+            "Word 母版",
+            ["八成以上", "六成至七成", "自訂簡版"],
+            horizontal=True,
+            help="前兩項直接套用你先前提供的114年正式成品 Word 版型；自訂簡版才使用上方自行輸入的標題。"
+        )
+        if template_kind != "自訂簡版":
+            st.info(f"目前使用「{template_kind}」實際成品 Word 作為母版：保留原本頁面設定、標題格式、姓名欄與「壹、單題」區塊，再插入本次選題。")
+
 
         if output_mode == "可編輯原會考風格（推薦）":
             st.info("此模式會依每題設定自動混合輸出：一般題用可編輯文字；圖文題用文字＋獨立圖片；特殊版面題可用「整題圖像」；（　）與新的組題題號仍是可編輯文字，題圖會改為正文寬度置於題號下方，不再塞在右欄。")
@@ -1242,13 +1317,15 @@ with tab4:
                 st.session_state.questions,
                 int(st.session_state.year),
                 suffix,
-                teacher=False
+                teacher=False,
+                template_kind=template_kind
             )
             teacher_bytes = make_editable_exam_layout_docx(
                 st.session_state.questions,
                 int(st.session_state.year),
                 suffix+"(詳解_教學法)",
-                teacher=True
+                teacher=True,
+                template_kind=template_kind
             )
 
         elif output_mode == "原 PDF 圖像版":
