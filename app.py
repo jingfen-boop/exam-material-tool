@@ -18,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.4 自訂題本編號"
+APP_VERSION = "Web v2.5 智慧分頁＋文意統整"
 
 # -----------------------------
 # Models
@@ -847,6 +847,59 @@ def _load_clean_template(kind: str, teacher: bool, year: int, count: int, bookle
             body.remove(child)
     return doc
 
+
+def _set_keep_with_next(paragraph, value=True):
+    """Keep a paragraph with the next paragraph in Word when possible."""
+    try:
+        paragraph.paragraph_format.keep_with_next = value
+    except Exception:
+        pass
+
+def _set_keep_together(paragraph, value=True):
+    """Prevent Word from splitting one paragraph across pages when possible."""
+    try:
+        paragraph.paragraph_format.keep_together = value
+    except Exception:
+        pass
+
+def _apply_smart_pagination(doc):
+    """Best-effort Word pagination: keep question starts/options/image blocks together.
+    Word remains the final layout engine, so this avoids hard-coded page heights.
+    """
+    paras = list(doc.paragraphs)
+    for i, p in enumerate(paras):
+        txt = (p.text or "").strip()
+        # Every paragraph should avoid splitting internally where practical.
+        _set_keep_together(p, True)
+
+        # Question start: （ ）1. / ( ) 1. and similar.
+        is_qstart = bool(re.match(r'^[（(]\s*[）)]\s*\d+\s*[.．、]?', txt))
+        is_option = bool(re.match(r'^[（(]?[A-DＡ-Ｄ][）).．、]', txt))
+        has_picture = bool(getattr(p, "_p", None) is not None and p._p.xpath('.//w:drawing|.//w:pict'))
+
+        if is_qstart:
+            # Keep question number/stem with at least the next block.
+            _set_keep_with_next(p, True)
+        if is_option and i < len(paras)-1:
+            # Keep A/B/C together; allow D to end the block.
+            letter = re.sub(r'[^A-DＡ-Ｄ]', '', txt[:4])
+            if letter not in ("D", "Ｄ"):
+                _set_keep_with_next(p, True)
+        if has_picture:
+            # Whole-question images should stay intact and with their question number.
+            _set_keep_together(p, True)
+
+    # Tables: prevent rows from splitting across pages.
+    for table in doc.tables:
+        for row in table.rows:
+            try:
+                trPr = row._tr.get_or_add_trPr()
+                from docx.oxml import OxmlElement
+                cantSplit = OxmlElement('w:cantSplit')
+                trPr.append(cantSplit)
+            except Exception:
+                pass
+
 def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
                                    teacher=False, template_kind="自訂簡版", booklet_no=""):
     selected = [q for q in questions if q.selected]
@@ -873,6 +926,7 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
             add_editable_exam_question(doc, q, i, teacher=teacher)
 
     out = io.BytesIO()
+    _apply_smart_pagination(doc)
     doc.save(out)
     return out.getvalue()
 
@@ -904,6 +958,7 @@ def make_exam_layout_docx(questions: List[Question], year: int, title_suffix: st
         )
 
     out = io.BytesIO()
+    _apply_smart_pagination(doc)
     doc.save(out)
     return out.getvalue()
 
@@ -922,6 +977,7 @@ def make_docx(questions: List[Question], year: int, title_suffix: str, teacher=F
         add_question(doc, q, i, year, teacher=teacher, use_crop=use_crop)
 
     out = io.BytesIO()
+    _apply_smart_pagination(doc)
     doc.save(out)
     return out.getvalue()
 
@@ -1249,7 +1305,7 @@ with tab3:
         with c2:
             q.category = st.selectbox(
                 "能力類型",
-                ["", "字詞辨識", "表層文意理解", "推論理解", "分析評鑑", "其他"],
+                ["", "字詞辨識", "表層文意理解", "推論理解", "分析評鑑", "其他", "文意統整"],
                 index=["", "字詞辨識", "表層文意理解", "推論理解", "分析評鑑", "其他"].index(q.category if q.category in ["", "字詞辨識", "表層文意理解", "推論理解", "分析評鑑", "其他"] else "其他"),
                 key=f"cat_{qno}"
             )
