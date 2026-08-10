@@ -17,7 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v1.9 混合版型"
+APP_VERSION = "Web v2.0 快速選題"
 
 # -----------------------------
 # Models
@@ -848,6 +848,40 @@ def make_docx(questions: List[Question], year: int, title_suffix: str, teacher=F
 # v1.8 deliberately contains no external AI/API calls.
 # Explanations and teaching steps are edited manually in the web interface.
 
+
+def parse_question_spec(spec: str, available_numbers):
+    """
+    Parse inputs like:
+      3
+      3,8,10
+      1-10
+      1-5,8,10,15-20
+    Returns a sorted unique list limited to available question numbers.
+    """
+    available = set(available_numbers)
+    result = set()
+    spec = (spec or "").replace("，", ",").replace("～", "-").replace("~", "-").strip()
+    if not spec:
+        return []
+    for part in [p.strip() for p in spec.split(",") if p.strip()]:
+        if "-" in part:
+            pieces = [x.strip() for x in part.split("-", 1)]
+            if len(pieces) != 2 or not pieces[0].isdigit() or not pieces[1].isdigit():
+                raise ValueError(f"無法辨識：{part}")
+            a, b = int(pieces[0]), int(pieces[1])
+            if a > b:
+                a, b = b, a
+            for n in range(a, b + 1):
+                if n in available:
+                    result.add(n)
+        else:
+            if not part.isdigit():
+                raise ValueError(f"無法辨識：{part}")
+            n = int(part)
+            if n in available:
+                result.add(n)
+    return sorted(result)
+
 # -----------------------------
 # Streamlit UI
 # -----------------------------
@@ -1027,7 +1061,7 @@ with tab2:
 
         keep_groups = st.checkbox("題組不可拆開（選中其中一題就保留同題組）", value=True)
 
-        if st.button("套用篩選"):
+        if st.button("套用通過率篩選"):
             qs = st.session_state.questions
             selected_nos = {q.source_no for q in qs if q.pass_rate is not None and lo <= q.pass_rate <= hi}
             if keep_groups:
@@ -1037,16 +1071,74 @@ with tab2:
                         selected_nos.add(q.source_no)
             for q in qs:
                 q.selected = q.source_no in selected_nos
+                st.session_state[f"sel_{q.source_no}"] = q.selected
             st.success(f"目前選取 {len(selected_nos)} 題。")
+            st.rerun()
 
-        st.markdown("#### 手動勾選")
+        st.divider()
+        st.markdown("### 快速指定題號")
+        st.caption("可以直接輸入：3、3,8,10、1-10、1-5,8,10,15-20。這會直接取代目前所有勾選。")
+
+        quick_spec = st.text_input(
+            "指定題號",
+            placeholder="例如：3 或 3,8,10 或 1-10",
+            key="quick_question_spec"
+        )
+
+        qc1, qc2, qc3 = st.columns(3)
+        with qc1:
+            if st.button("只選指定題號", use_container_width=True):
+                try:
+                    available = [q.source_no for q in st.session_state.questions]
+                    chosen = set(parse_question_spec(quick_spec, available))
+                    if not chosen:
+                        st.warning("沒有選到任何題目，請檢查輸入。")
+                    else:
+                        if keep_groups:
+                            group_ids = {q.group_id for q in st.session_state.questions if q.source_no in chosen and q.group_id}
+                            for q in st.session_state.questions:
+                                if q.group_id and q.group_id in group_ids:
+                                    chosen.add(q.source_no)
+                        for q in st.session_state.questions:
+                            q.selected = q.source_no in chosen
+                            st.session_state[f"sel_{q.source_no}"] = q.selected
+                        st.success("已只選：" + "、".join(map(str, sorted(chosen))))
+                        st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+        with qc2:
+            if st.button("全部取消", use_container_width=True):
+                for q in st.session_state.questions:
+                    q.selected = False
+                    st.session_state[f"sel_{q.source_no}"] = False
+                st.rerun()
+
+        with qc3:
+            if st.button("全部選取", use_container_width=True):
+                for q in st.session_state.questions:
+                    q.selected = True
+                    st.session_state[f"sel_{q.source_no}"] = True
+                st.rerun()
+
+        selected_now = [q.source_no for q in st.session_state.questions if q.selected]
+        st.info(
+            f"目前共選取 {len(selected_now)} 題"
+            + (f"：{'、'.join(map(str, selected_now))}" if len(selected_now) <= 20 else "")
+        )
+
+        st.markdown("### 手動微調")
+        st.caption("快速選題或通過率篩選後，可在這裡做最後加減。")
         for q in st.session_state.questions:
             rate = "—" if q.pass_rate is None else f"{q.pass_rate:.2f}"
-            q.selected = st.checkbox(
+            key = f"sel_{q.source_no}"
+            if key not in st.session_state:
+                st.session_state[key] = q.selected
+            new_val = st.checkbox(
                 f"原第 {q.source_no} 題｜通過率 {rate}｜答案 {q.answer or '—'}｜{q.category or '未分類'}",
-                value=q.selected,
-                key=f"sel_{q.source_no}"
+                key=key
             )
+            q.selected = new_val
 
 with tab3:
     if not st.session_state.questions:
@@ -1088,8 +1180,33 @@ with tab4:
     if not st.session_state.questions:
         st.info("請先建立題庫。")
     else:
+        st.markdown("### 輸出題目")
+        st.caption("若只想臨時輸出幾題，可直接在這裡輸入題號，不必回②重選。例如：3、3,8,10、1-10。")
+        export_spec = st.text_input("本次輸出題號（留白＝使用②目前選取）", key="export_question_spec")
+
         selected = [q for q in st.session_state.questions if q.selected]
-        st.write(f"目前選取：**{len(selected)} 題**")
+        export_questions = selected
+
+        if export_spec.strip():
+            try:
+                available = [q.source_no for q in st.session_state.questions]
+                chosen_export = set(parse_question_spec(export_spec, available))
+                export_questions = [q for q in st.session_state.questions if q.source_no in chosen_export]
+            except Exception as e:
+                st.error(str(e))
+                export_questions = []
+
+        st.write(f"本次輸出：**{len(export_questions)} 題**"
+                 + (f"（{'、'.join(str(q.source_no) for q in export_questions)}）" if len(export_questions) <= 20 else ""))
+
+        # Temporarily map selection state for output generators without permanently changing step②.
+        original_selected_states = {q.source_no: q.selected for q in st.session_state.questions}
+        if export_spec.strip():
+            export_nos = {q.source_no for q in export_questions}
+            for q in st.session_state.questions:
+                q.selected = q.source_no in export_nos
+
+        selected = [q for q in st.session_state.questions if q.selected]
         unreviewed = [q.source_no for q in selected if not q.reviewed]
         if unreviewed:
             st.warning("目前選取題目中仍有未人工確認的題目：" + "、".join(map(str, unreviewed)) + "。原版型輸出仍可保留原 PDF 題目外觀。")
@@ -1167,6 +1284,10 @@ with tab4:
                 teacher=True,
                 preserve_visual=preserve_visual
             )
+
+        if export_spec.strip():
+            for q in st.session_state.questions:
+                q.selected = original_selected_states.get(q.source_no, q.selected)
 
         c1,c2 = st.columns(2)
         with c1:
