@@ -17,7 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v1.3"
+APP_VERSION = "Web v1.4"
 
 # -----------------------------
 # Models
@@ -36,8 +36,10 @@ class Question:
     note_strategy: str = ""
     group_id: str = ""
     group_intro: str = ""
+    material: str = ""
     crop_png: bytes = b""
     visual_mode: bool = False
+    reviewed: bool = False
     selected: bool = True
 
     def __post_init__(self):
@@ -277,6 +279,37 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
 
     return questions, page_images
 
+def _question_structure_status(q: Question) -> str:
+    """Simple QA indicator for manual proofreading."""
+    issues = []
+    if not q.text.strip():
+        issues.append("缺題幹")
+    if len(q.options) < 4:
+        issues.append(f"選項{len(q.options)}/4")
+    if not q.answer:
+        issues.append("缺答案")
+    if q.pass_rate is None:
+        issues.append("缺通過率")
+    return "已確認" if q.reviewed else ("待校對：" + "、".join(issues) if issues else "待確認")
+
+def _clean_option_text(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip())
+
+def _apply_structure_edit(q: Question, material: str, stem: str,
+                          opt_a: str, opt_b: str, opt_c: str, opt_d: str,
+                          group_id: str, visual_mode: bool, reviewed: bool):
+    q.material = material.strip()
+    q.text = stem.strip()
+    q.options = {
+        "A": _clean_option_text(opt_a),
+        "B": _clean_option_text(opt_b),
+        "C": _clean_option_text(opt_c),
+        "D": _clean_option_text(opt_d),
+    }
+    q.group_id = group_id.strip()
+    q.visual_mode = bool(visual_mode)
+    q.reviewed = bool(reviewed)
+
 def merge_metadata(questions, answers, rates):
     for q in questions:
         q.answer = answers.get(q.source_no, q.answer)
@@ -361,6 +394,10 @@ def add_question(doc, q: Question, display_no: int, year: int, teacher=False, us
         p2 = doc.add_paragraph()
         p2.add_run().add_picture(io.BytesIO(q.crop_png), width=Cm(16.6))
     else:
+        if q.material.strip():
+            pmaterial = doc.add_paragraph()
+            rm = pmaterial.add_run(q.material)
+            set_eastasia(rm)
         r = p.add_run(q.text)
         set_eastasia(r)
         for key in ["A","B","C","D"]:
@@ -427,6 +464,8 @@ def ai_generate(q: Question, api_key: str, model: str):
 不得改動官方答案。若資料不足，請明確標示「待人工確認」。
 
 題號：{q.source_no}
+題組：{q.group_id or "無"}
+閱讀／共用材料：{q.material or q.group_intro or "無"}
 題目：{q.text}
 選項：
 {opts}
@@ -509,10 +548,74 @@ with tab1:
                 "答案": q.answer,
                 "通過率": q.pass_rate,
                 "題組": q.group_id,
+                "選項": f"{len(q.options)}/4",
                 "有圖/複雜版面": "是" if q.visual_mode else "",
+                "校對": _question_structure_status(q),
                 "題幹預覽": q.text[:55].replace("\n"," ")
             })
         st.dataframe(data, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("### 題目結構校對")
+        st.caption("左側看原 PDF 裁圖；右側可直接修正共用材料、題幹、A–D、題組與圖片模式。修正後按「儲存本題校對」。")
+
+        review_choices = [q.source_no for q in st.session_state.questions]
+        review_no = st.selectbox("選擇要校對的原題號", review_choices, key="review_qno")
+        rq = next(x for x in st.session_state.questions if x.source_no == review_no)
+
+        rc1, rc2 = st.columns([1.05, 1])
+        with rc1:
+            st.markdown(f"#### 原 PDF｜第 {rq.source_no} 題")
+            st.caption(f"原頁：{rq.page_no}｜答案：{rq.answer or '—'}｜通過率：{rq.pass_rate if rq.pass_rate is not None else '—'}")
+            if rq.crop_png:
+                st.image(rq.crop_png, caption="原 PDF 題目區塊", use_container_width=True)
+            else:
+                st.info("本題目前沒有裁圖。")
+
+        with rc2:
+            material_edit = st.text_area(
+                "閱讀／共用材料（沒有可留白）",
+                value=rq.material,
+                height=130,
+                key=f"review_material_{review_no}"
+            )
+            stem_edit = st.text_area(
+                "題幹",
+                value=rq.text,
+                height=120,
+                key=f"review_stem_{review_no}"
+            )
+            oa = st.text_area("A", value=rq.options.get("A",""), height=70, key=f"review_A_{review_no}")
+            ob = st.text_area("B", value=rq.options.get("B",""), height=70, key=f"review_B_{review_no}")
+            oc = st.text_area("C", value=rq.options.get("C",""), height=70, key=f"review_C_{review_no}")
+            od = st.text_area("D", value=rq.options.get("D",""), height=70, key=f"review_D_{review_no}")
+            group_edit = st.text_input(
+                "題組 ID（例如 21-23；非題組留白）",
+                value=rq.group_id,
+                key=f"review_group_{review_no}"
+            )
+            visual_edit = st.checkbox(
+                "Word 輸出時優先保留原 PDF 裁圖",
+                value=rq.visual_mode,
+                key=f"review_visual_{review_no}"
+            )
+            reviewed_edit = st.checkbox(
+                "本題內容已人工確認",
+                value=rq.reviewed,
+                key=f"review_done_{review_no}"
+            )
+
+            if st.button("💾 儲存本題校對", type="primary", key=f"save_review_{review_no}"):
+                _apply_structure_edit(
+                    rq, material_edit, stem_edit, oa, ob, oc, od,
+                    group_edit, visual_edit, reviewed_edit
+                )
+                st.success(f"第 {rq.source_no} 題已儲存。")
+                st.rerun()
+
+        reviewed_count = sum(1 for q in st.session_state.questions if q.reviewed)
+        st.progress(reviewed_count / len(st.session_state.questions))
+        st.caption(f"人工校對進度：{reviewed_count}/{len(st.session_state.questions)} 題。")
 
 with tab2:
     if not st.session_state.questions:
@@ -564,6 +667,10 @@ with tab3:
         c1,c2 = st.columns([1,1])
         with c1:
             st.markdown(f"### 原第 {q.source_no} 題")
+            if q.material.strip():
+                st.markdown("**閱讀／共用材料**")
+                st.write(q.material)
+            st.markdown("**題幹**")
             st.write(q.text)
             for k,v in q.options.items():
                 st.write(f"({k}) {v}")
@@ -601,6 +708,11 @@ with tab4:
     else:
         selected = [q for q in st.session_state.questions if q.selected]
         st.write(f"目前選取：**{len(selected)} 題**")
+        unreviewed = [q.source_no for q in selected if not q.reviewed]
+        if unreviewed:
+            st.warning("目前選取題目中仍有未人工確認的題目：" + "、".join(map(str, unreviewed)) + "。仍可輸出，但建議先完成結構校對。")
+        else:
+            st.success("目前選取題目皆已完成結構校對。")
         preserve_visual = st.checkbox("圖片／圖表／複雜題優先保留原 PDF 裁圖", value=True)
         suffix = st.text_input("題本標題後綴", value="通過率篩選題本")
 
