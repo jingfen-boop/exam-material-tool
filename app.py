@@ -18,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.3 範本套版"
+APP_VERSION = "Web v2.4 自訂題本編號"
 
 # -----------------------------
 # Models
@@ -804,7 +804,7 @@ def _template_path(kind: str, teacher: bool) -> Path:
     }
     return base / mapping[(kind, teacher)]
 
-def _load_clean_template(kind: str, teacher: bool, year: int, count: int):
+def _load_clean_template(kind: str, teacher: bool, year: int, count: int, booklet_no: str = ""):
     """Load the user's real sample Word and retain its page/style/header area through 壹、單題."""
     path = _template_path(kind, teacher)
     if not path.exists():
@@ -816,7 +816,13 @@ def _load_clean_template(kind: str, teacher: bool, year: int, count: int):
         p0 = doc.paragraphs[0]
         old = p0.text
         label = "通過率達八成以上" if kind == "八成以上" else "通過率達六成至七成"
-        new_title = f"{year}會考國文題本-{label}-題本（{_zh_num(count)}）"
+        booklet_label = (booklet_no or "").strip()
+        if booklet_label:
+            # User controls the booklet identifier exactly as entered.
+            new_title = f"{year}會考國文題本-{label}-題本（{booklet_label}）"
+        else:
+            # Fallback only when the user leaves it blank.
+            new_title = f"{year}會考國文題本-{label}-題本（{_zh_num(count)}）"
         if p0.runs:
             p0.runs[0].text = new_title
             for r in p0.runs[1:]:
@@ -842,12 +848,12 @@ def _load_clean_template(kind: str, teacher: bool, year: int, count: int):
     return doc
 
 def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
-                                   teacher=False, template_kind="自訂簡版") -> bytes:
+                                   teacher=False, template_kind="自訂簡版", booklet_no=""):
     selected = [q for q in questions if q.selected]
 
     doc = None
     if template_kind in ("八成以上", "六成至七成"):
-        doc = _load_clean_template(template_kind, teacher, year, len(selected))
+        doc = _load_clean_template(template_kind, teacher, year, len(selected), booklet_no=booklet_no)
 
     if doc is None:
         doc = Document()
@@ -1306,6 +1312,12 @@ with tab4:
         )
         if template_kind != "自訂簡版":
             st.info(f"目前使用「{template_kind}」實際成品 Word 作為母版：保留原本頁面設定、標題格式、姓名欄與「壹、單題」區塊，再插入本次選題。")
+        booklet_no = st.text_input(
+            "題本編號",
+            value="1",
+            help="這是標題最後的題本編號。你可以輸入 1、2、A、甲、01 等；程式會原樣放入「題本（　）」中。"
+        )
+        st.caption(f"目前標題題本編號會顯示為：題本（{booklet_no.strip() or '自動'}）")
 
 
         if output_mode == "可編輯原會考風格（推薦）":
@@ -1318,14 +1330,16 @@ with tab4:
                 int(st.session_state.year),
                 suffix,
                 teacher=False,
-                template_kind=template_kind
+                template_kind=template_kind,
+                booklet_no=booklet_no
             )
             teacher_bytes = make_editable_exam_layout_docx(
                 st.session_state.questions,
                 int(st.session_state.year),
                 suffix+"(詳解_教學法)",
                 teacher=True,
-                template_kind=template_kind
+                template_kind=template_kind,
+                booklet_no=booklet_no
             )
 
         elif output_mode == "原 PDF 圖像版":
@@ -1383,7 +1397,7 @@ with tab4:
             st.download_button(
                 "⬇️ 下載學生題本 Word",
                 data=student_bytes,
-                file_name=f"{st.session_state.year}年會考國文_{suffix}.docx",
+                file_name=f"{st.session_state.year}年會考國文_{suffix}_題本{booklet_no.strip() or '自動'}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 type="primary",
                 use_container_width=True
@@ -1392,7 +1406,7 @@ with tab4:
             st.download_button(
                 "⬇️ 下載詳解／教學法 Word",
                 data=teacher_bytes,
-                file_name=f"{st.session_state.year}年會考國文_{suffix}(詳解_教學法).docx",
+                file_name=f"{st.session_state.year}年會考國文_{suffix}_題本{booklet_no.strip() or '自動'}(詳解_教學法).docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True
             )
