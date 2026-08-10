@@ -17,7 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.1 題本排版修正版"
+APP_VERSION = "Web v2.2 題本母版修正版"
 
 # -----------------------------
 # Models
@@ -626,19 +626,33 @@ def _add_first_image_to_cell(cell, q: Question, width_cm=6.3):
         pass
 
 
+
+def trim_full_image_left_gutter(data: bytes, ratio: float = 0.075) -> bytes:
+    """Trim the blank gutter left after the original source question number is erased."""
+    try:
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+        w, h = im.size
+        cut = max(0, min(int(w * ratio), int(w * 0.12)))
+        if cut <= 0:
+            return data
+        im = im.crop((cut, 0, w, h))
+        out = io.BytesIO()
+        im.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return data
+
 def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=False):
     """
-    Full-image question mode:
-    - editable answer bracket and NEW question number
-    - source question body preserved as a near-full-width image
-    - original source number erased in body_crop_png
-    - no side-by-side table, so the image cannot be pushed to the right or clipped
+    Full-image mode for complex source questions.
+    Editable: answer bracket + new question number.
+    Visual: original question body as one image, with the old number gutter removed.
     """
     p = doc.add_paragraph()
     p.paragraph_format.left_indent = Cm(0)
     p.paragraph_format.first_line_indent = Cm(0)
     p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(2)
+    p.paragraph_format.space_after = Pt(0)
     answer_text = q.answer if teacher and q.answer else "　"
     r = p.add_run(f"（{answer_text}）{display_no}.")
     set_eastasia(r)
@@ -648,14 +662,20 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
 
     data = q.body_crop_png or q.crop_png
     if data:
+        data = trim_full_image_left_gutter(data)
         pimg = doc.add_paragraph()
-        pimg.paragraph_format.left_indent = Cm(0.75)
+        pimg.paragraph_format.left_indent = Cm(0.35)
         pimg.paragraph_format.right_indent = Cm(0)
         pimg.paragraph_format.space_before = Pt(0)
-        pimg.paragraph_format.space_after = Pt(3)
+        pimg.paragraph_format.space_after = Pt(2)
         try:
-            # A4 text area is about 17 cm in this document. Keep image comfortably inside it.
-            pimg.add_run().add_picture(io.BytesIO(data), width=Cm(15.8))
+            # Preserve aspect ratio and keep within the usable A4 text width.
+            im = Image.open(io.BytesIO(data))
+            w, h = im.size
+            max_w = 16.6
+            # Do not enlarge small source images excessively.
+            target_w = min(max_w, max(11.0, max_w if w >= 900 else 14.5))
+            pimg.add_run().add_picture(io.BytesIO(data), width=Cm(target_w))
         except Exception:
             pass
 
@@ -765,7 +785,7 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
 def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str, teacher=False) -> bytes:
     doc = Document()
     setup_exam_style_doc(doc)
-    title = f"{year}會考國文題本-{title_suffix}"
+    title = (title_suffix or "").strip() or f"{year}年國中教育會考 國文科"
     add_exam_style_header(doc, title)
 
     p = doc.add_paragraph()
@@ -1211,7 +1231,7 @@ with tab4:
             horizontal=True,
             help="可編輯原會考風格：文字可編輯、圖片獨立插入並套用近似版型。原 PDF 圖像版：最像原卷但題目文字不可編輯。一般可編輯文字版：版面較簡化。"
         )
-        suffix = st.text_input("題本標題後綴", value="通過率篩選題本")
+        suffix = st.text_input("學生題本標題", value=f"{year}年國中教育會考 國文科", help="這裡會原樣成為 Word 頁首主標題，可直接改成你的正式範本標題。")
 
         if output_mode == "可編輯原會考風格（推薦）":
             st.info("此模式會依每題設定自動混合輸出：一般題用可編輯文字；圖文題用文字＋獨立圖片；特殊版面題可用「整題圖像」；（　）與新的組題題號仍是可編輯文字，題圖會改為正文寬度置於題號下方，不再塞在右欄。")
