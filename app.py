@@ -18,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.5 智慧分頁＋文意統整"
+APP_VERSION = "Web v2.6 穩定分頁＋文意統整"
 
 # -----------------------------
 # Models
@@ -673,9 +673,9 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
             # Preserve aspect ratio and keep within the usable A4 text width.
             im = Image.open(io.BytesIO(data))
             w, h = im.size
-            max_w = 16.6
-            # Do not enlarge small source images excessively.
-            target_w = min(max_w, max(11.0, max_w if w >= 900 else 14.5))
+            max_w = 16.2
+            # Use more of the printable width while preserving aspect ratio.
+            target_w = min(max_w, max(13.5, max_w if w >= 750 else 15.2))
             pimg.add_run().add_picture(io.BytesIO(data), width=Cm(target_w))
         except Exception:
             pass
@@ -780,8 +780,7 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
             r2 = p.add_run(q.note_strategy)
             set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
-    p = doc.add_paragraph()
-    p.paragraph_format.space_after = Pt(3)
+    # Keep only normal paragraph spacing; do not insert an empty spacer paragraph.
 
 
 def _zh_num(n: int) -> str:
@@ -848,57 +847,51 @@ def _load_clean_template(kind: str, teacher: bool, year: int, count: int, bookle
     return doc
 
 
-def _set_keep_with_next(paragraph, value=True):
-    """Keep a paragraph with the next paragraph in Word when possible."""
-    try:
-        paragraph.paragraph_format.keep_with_next = value
-    except Exception:
-        pass
-
-def _set_keep_together(paragraph, value=True):
-    """Prevent Word from splitting one paragraph across pages when possible."""
-    try:
-        paragraph.paragraph_format.keep_together = value
-    except Exception:
-        pass
-
-def _apply_smart_pagination(doc):
-    """Best-effort Word pagination: keep question starts/options/image blocks together.
-    Word remains the final layout engine, so this avoids hard-coded page heights.
+def _estimated_question_lines(q: Question) -> float:
+    """Estimate vertical space without using Word keep-with-next flags.
+    This avoids the black square pagination marks and large artificial gaps.
     """
-    paras = list(doc.paragraphs)
-    for i, p in enumerate(paras):
-        txt = (p.text or "").strip()
-        # Every paragraph should avoid splitting internally where practical.
-        _set_keep_together(p, True)
-
-        # Question start: （ ）1. / ( ) 1. and similar.
-        is_qstart = bool(re.match(r'^[（(]\s*[）)]\s*\d+\s*[.．、]?', txt))
-        is_option = bool(re.match(r'^[（(]?[A-DＡ-Ｄ][）).．、]', txt))
-        has_picture = bool(getattr(p, "_p", None) is not None and p._p.xpath('.//w:drawing|.//w:pict'))
-
-        if is_qstart:
-            # Keep question number/stem with at least the next block.
-            _set_keep_with_next(p, True)
-        if is_option and i < len(paras)-1:
-            # Keep A/B/C together; allow D to end the block.
-            letter = re.sub(r'[^A-DＡ-Ｄ]', '', txt[:4])
-            if letter not in ("D", "Ｄ"):
-                _set_keep_with_next(p, True)
-        if has_picture:
-            # Whole-question images should stay intact and with their question number.
-            _set_keep_together(p, True)
-
-    # Tables: prevent rows from splitting across pages.
-    for table in doc.tables:
-        for row in table.rows:
+    mode = _effective_render_mode(q)
+    if mode == "整題圖像":
+        data = q.body_crop_png or q.crop_png
+        if data:
             try:
-                trPr = row._tr.get_or_add_trPr()
-                from docx.oxml import OxmlElement
-                cantSplit = OxmlElement('w:cantSplit')
-                trPr.append(cantSplit)
+                im = Image.open(io.BytesIO(data))
+                w, h = im.size
+                # Approximate the displayed image height at 14.8–16.0 cm wide.
+                aspect = h / max(w, 1)
+                return max(12.0, min(28.0, 25.0 * aspect + 3.0))
             except Exception:
-                pass
+                return 18.0
+        return 15.0
+
+    chars_per_line = 34.0
+    total = 2.0
+    if q.material.strip():
+        total += max(1.0, len(q.material.strip()) / chars_per_line)
+    total += max(1.0, len((q.text or "").strip()) / chars_per_line)
+    for k in ("A", "B", "C", "D"):
+        opt = (q.options.get(k, "") or "").strip()
+        total += max(1.0, len(opt) / chars_per_line)
+
+    if q.include_image and q.image_pngs:
+        total += 10.0
+    return min(total + 2.0, 32.0)
+
+def _add_stable_page_break_if_needed(doc, q: Question, used_lines: float, first_page: bool):
+    """Return (new_used_lines, did_break).
+    Uses explicit page breaks only between questions. It never sets keep_with_next,
+    keep_together, bullets, or list styles.
+    """
+    capacity = 43.0 if first_page else 50.0
+    need = _estimated_question_lines(q)
+
+    # If the whole question is reasonably sized but won't fit, start it on next page.
+    # Large questions are allowed to flow naturally in Word.
+    if used_lines > 8.0 and need <= 31.0 and used_lines + need > capacity:
+        doc.add_page_break()
+        return need, True
+    return used_lines + need, False
 
 def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
                                    teacher=False, template_kind="自訂簡版", booklet_no=""):
@@ -918,7 +911,18 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
         set_eastasia(r)
         r.bold = True
 
+    # Stable pagination: explicit page breaks only BETWEEN questions.
+    # No keep_with_next/keep_together flags are used, so Word will not show
+    # the black square pagination marks seen in v2.5.
+    used_lines = 9.0   # title + name table + section heading on page 1
+    first_page = True
     for i, q in enumerate(selected, start=1):
+        used_lines, did_break = _add_stable_page_break_if_needed(
+            doc, q, used_lines, first_page
+        )
+        if did_break:
+            first_page = False
+
         mode = _effective_render_mode(q)
         if mode == "整題圖像":
             add_full_image_exam_question(doc, q, i, teacher=teacher)
@@ -926,7 +930,6 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
             add_editable_exam_question(doc, q, i, teacher=teacher)
 
     out = io.BytesIO()
-    _apply_smart_pagination(doc)
     doc.save(out)
     return out.getvalue()
 
@@ -958,7 +961,6 @@ def make_exam_layout_docx(questions: List[Question], year: int, title_suffix: st
         )
 
     out = io.BytesIO()
-    _apply_smart_pagination(doc)
     doc.save(out)
     return out.getvalue()
 
@@ -977,7 +979,6 @@ def make_docx(questions: List[Question], year: int, title_suffix: str, teacher=F
         add_question(doc, q, i, year, teacher=teacher, use_crop=use_crop)
 
     out = io.BytesIO()
-    _apply_smart_pagination(doc)
     doc.save(out)
     return out.getvalue()
 
@@ -1305,8 +1306,8 @@ with tab3:
         with c2:
             q.category = st.selectbox(
                 "能力類型",
-                ["", "字詞辨識", "表層文意理解", "推論理解", "分析評鑑", "其他", "文意統整"],
-                index=["", "字詞辨識", "表層文意理解", "推論理解", "分析評鑑", "其他"].index(q.category if q.category in ["", "字詞辨識", "表層文意理解", "推論理解", "分析評鑑", "其他"] else "其他"),
+                ["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"],
+                index=["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"].index(q.category if q.category in ["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"] else "其他"),
                 key=f"cat_{qno}"
             )
             q.explanation = st.text_area("解析", value=q.explanation, height=220, key=f"exp_{qno}")
