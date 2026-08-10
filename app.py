@@ -17,7 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v1.1"
+APP_VERSION = "Web v1.2"
 
 # -----------------------------
 # Models
@@ -54,201 +54,190 @@ def pdf_text(pdf_bytes: bytes) -> str:
 def _row_words(words, y_center, tol=5.0):
     return [w for w in words if abs(((w[1]+w[3])/2)-y_center) <= tol]
 
-def _header_x(words, label="國文"):
+def _header_center(words, label):
     hits = [w for w in words if w[4].strip() == label]
     if not hits:
         return None
-    w = hits[0]
-    return (w[0]+w[2])/2
+    return sum((w[0]+w[2])/2 for w in hits) / len(hits)
+
+def _chinese_column_bounds(words):
+    hx = _header_center(words, "國文")
+    if hx is None:
+        return None
+    other_centers = []
+    for label in ["英語", "數學", "社會", "自然"]:
+        for w in words:
+            if w[4].strip() == label:
+                other_centers.append((w[0]+w[2])/2)
+    right_candidates = [x for x in other_centers if x > hx]
+    right = min(right_candidates) if right_candidates else hx + 100
+    left_anchor = 95.0
+    xmin = (left_anchor + hx) / 2
+    xmax = (hx + right) / 2
+    return hx, xmin, xmax
 
 def parse_answers(answer_pdf: bytes) -> Dict[int, str]:
-    """
-    以 PDF 文字座標讀取答案表，而不是依賴換行順序。
-    找到「國文」欄的 x 座標，再逐列取同一 y 位置的 A-D。
-    """
     doc = fitz.open(stream=answer_pdf, filetype="pdf")
     out = {}
     for page in doc:
         words = page.get_text("words")
-        hx = _header_x(words, "國文")
-        if hx is None:
+        bounds = _chinese_column_bounds(words)
+        if not bounds:
             continue
+        hx, xmin, xmax = bounds
         for w in words:
             token = w[4].strip()
             if not re.fullmatch(r"\d{1,3}", token):
                 continue
             qno = int(token)
-            if not (1 <= qno <= 200):
-                continue
             yc = (w[1]+w[3])/2
-            row = _row_words(words, yc, tol=4.5)
-            candidates = [rw for rw in row if re.fullmatch(r"[ABCD]", rw[4].strip())]
-            if not candidates:
-                continue
-            chosen = min(candidates, key=lambda rw: abs(((rw[0]+rw[2])/2)-hx))
-            out[qno] = chosen[4].strip()
+            row = _row_words(words, yc, tol=4.8)
+            candidates = []
+            for rw in row:
+                cx = (rw[0]+rw[2])/2
+                if xmin <= cx <= xmax and re.fullmatch(r"[ABCD]", rw[4].strip()):
+                    candidates.append(rw)
+            if candidates:
+                chosen = min(candidates, key=lambda rw: abs(((rw[0]+rw[2])/2)-hx))
+                out[qno] = chosen[4].strip()
     return out
 
 def parse_pass_rates(rate_pdf: bytes) -> Dict[int, float]:
-    """
-    以 PDF 文字座標讀取通過率表。
-    找到「國文」欄的 x 座標，再逐列取同一 y 位置最靠近該欄的 0.xx。
-    """
     doc = fitz.open(stream=rate_pdf, filetype="pdf")
     out = {}
     for page in doc:
         words = page.get_text("words")
-        hx = _header_x(words, "國文")
-        if hx is None:
+        bounds = _chinese_column_bounds(words)
+        if not bounds:
             continue
+        hx, xmin, xmax = bounds
         for w in words:
             token = w[4].strip()
             if not re.fullmatch(r"\d{1,3}", token):
                 continue
             qno = int(token)
-            if not (1 <= qno <= 200):
-                continue
             yc = (w[1]+w[3])/2
-            row = _row_words(words, yc, tol=4.5)
+            row = _row_words(words, yc, tol=5.0)
             candidates = []
             for rw in row:
                 t = rw[4].strip()
-                if re.fullmatch(r"(?:0(?:\.\d+)?|1(?:\.0+)?)", t):
+                cx = (rw[0]+rw[2])/2
+                if xmin <= cx <= xmax and re.fullmatch(r"(?:0\.\d+|1(?:\.0+)?)", t):
                     candidates.append(rw)
-            if not candidates:
-                continue
-            chosen = min(candidates, key=lambda rw: abs(((rw[0]+rw[2])/2)-hx))
-            try:
+            if candidates:
+                chosen = min(candidates, key=lambda rw: abs(((rw[0]+rw[2])/2)-hx))
                 out[qno] = float(chosen[4])
-            except ValueError:
-                pass
     return out
 
 def _line_text(line):
     return "".join(span.get("text", "") for span in line.get("spans", []))
 
-def _looks_like_option(text):
-    return bool(re.match(r"^\s*[\(（][ABCD][\)）]", text.strip()))
-
-def _question_starts(page, page_no):
-    """Find genuine question-number lines, excluding the instruction page."""
-    if page_no <= 2:
-        return []
+def _candidate_number_lines(page):
+    out = []
     d = page.get_text("dict")
-    candidates = []
     for block in d.get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
             txt = _line_text(line).strip()
-            bbox = line.get("bbox", [0,0,0,0])
-            m = re.match(r"^(\d{1,2})\.\s*(.+)", txt)
-            if not m:
-                continue
-            qno = int(m.group(1))
-            rest = m.group(2).strip()
-            # Genuine questions must have content after the number and be in the body.
-            if 1 <= qno <= 99 and len(rest) >= 2 and bbox[1] < page.rect.height - 45:
-                candidates.append((qno, bbox, txt))
-    return sorted(candidates, key=lambda x: (x[1][1], x[1][0]))
+            m = re.fullmatch(r"(\d{1,2})\.\s*", txt)
+            if m:
+                bbox = line.get("bbox", [0,0,0,0])
+                out.append((int(m.group(1)), bbox))
+    return sorted(out, key=lambda x: (x[1][1], x[1][0]))
 
-def extract_questions(question_pdf: bytes) -> Tuple[List[Question], Dict[int, bytes]]:
-    """
-    v1.1 parser:
-    - excludes cover/instruction pages
-    - finds genuine numbered questions from page 3 onward
-    - uses question number order across pages
-    - preserves original crop for visual verification
-    - identifies common question groups from '回答 X～Y 題' instructions
-    """
+def _sequential_question_starts(doc, expected_count):
+    expected = 1
+    starts = []
+    for pi, page in enumerate(doc, start=1):
+        if pi == 1:
+            continue
+        for qno, bbox in _candidate_number_lines(page):
+            if qno == expected:
+                starts.append({"qno": qno, "page": pi, "bbox": bbox})
+                expected += 1
+                if expected > expected_count:
+                    return starts
+    return starts
+
+def _region_text_and_options(page, y0, y1, qno):
+    d = page.get_text("dict")
+    rows = []
+    for block in d.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            bbox = line.get("bbox", [0,0,0,0])
+            cy = (bbox[1]+bbox[3])/2
+            if y0 <= cy < y1:
+                t = _line_text(line).strip()
+                if t and t not in {"請翻頁繼續作答", "請不要翻到次頁！"}:
+                    if re.fullmatch(r"\d{1,2}", t) and bbox[1] > page.rect.height-100:
+                        continue
+                    rows.append((bbox[1], bbox[0], t))
+    rows.sort(key=lambda x:(x[0],x[1]))
+
+    stem_lines, options = [], {}
+    current_opt = None
+    for _, _, t in rows:
+        if re.fullmatch(rf"{qno}\.\s*", t):
+            continue
+        mo = re.match(r"^\s*[\(（]\s*([ABCD])\s*[\)）]\s*(.*)", t)
+        if mo:
+            current_opt = mo.group(1)
+            options[current_opt] = mo.group(2).strip()
+        elif current_opt:
+            if t.startswith("【") or t.startswith("《") or t.startswith(""):
+                current_opt = None
+                stem_lines.append(t)
+            else:
+                options[current_opt] = (options[current_opt] + " " + t).strip()
+        else:
+            stem_lines.append(t)
+
+    promptish = [x for x in stem_lines if ("何者" in x or "下列" in x or "根據" in x or "關於" in x)]
+    if promptish and stem_lines and stem_lines[0] not in promptish:
+        first = promptish[0]
+        stem_lines = [first] + [x for x in stem_lines if x != first]
+
+    return "\n".join(stem_lines).strip(), options
+
+def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[List[Question], Dict[int, bytes]]:
     doc = fitz.open(stream=question_pdf, filetype="pdf")
     page_images = {}
     for pi, page in enumerate(doc, start=1):
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.25,1.25), alpha=False)
         page_images[pi] = pix.tobytes("png")
 
-    # Group ranges, tolerant of Chinese punctuation/spaces.
     full_text = "\n".join(page.get_text("text") for page in doc)
     groups = []
     for m in re.finditer(r"回答\s*(\d{1,2})\s*[～~\-至]\s*(\d{1,2})\s*題", full_text):
-        a, b = int(m.group(1)), int(m.group(2))
-        if a <= b:
+        a,b=int(m.group(1)),int(m.group(2))
+        if a<=b:
             groups.append((a,b))
 
-    # Collect genuine starts globally.
-    starts = []
-    for pi, page in enumerate(doc, start=1):
-        for qno, bbox, txt in _question_starts(page, pi):
-            starts.append({"qno": qno, "page": pi, "bbox": bbox, "line": txt})
-
-    # Keep the best monotonic occurrence of each qno.
-    by_no = {}
-    for s in starts:
-        by_no.setdefault(s["qno"], s)
-    ordered = [by_no[k] for k in sorted(by_no)]
-
+    starts = _sequential_question_starts(doc, expected_count)
     questions = []
-    for idx, s in enumerate(ordered):
+
+    for idx, s in enumerate(starts):
         qno, pi = s["qno"], s["page"]
         page = doc[pi-1]
-        d = page.get_text("dict")
-        y0 = max(0, s["bbox"][1]-5)
-
-        # End at next genuine question on same page, otherwise page bottom.
+        y0 = max(0, s["bbox"][1]-6)
         y1 = page.rect.height - 35
-        for later in ordered[idx+1:]:
+        for later in starts[idx+1:]:
             if later["page"] == pi:
-                y1 = max(y0+30, later["bbox"][1]-5)
+                y1 = max(y0+35, later["bbox"][1]-6)
                 break
             if later["page"] > pi:
                 break
 
-        # Gather only text inside this question region.
-        region_lines = []
-        for block in d.get("blocks", []):
-            if block.get("type") != 0:
-                continue
-            for line in block.get("lines", []):
-                bbox = line.get("bbox", [0,0,0,0])
-                cy = (bbox[1]+bbox[3])/2
-                if y0 <= cy < y1:
-                    t = _line_text(line).strip()
-                    if t and t not in {"請翻頁繼續作答", "請不要翻到次頁！"}:
-                        region_lines.append((bbox[1], bbox[0], t))
-        region_lines.sort()
-        raw_lines = [x[2] for x in region_lines]
-
-        # Remove number prefix from the first matching question line.
-        cleaned = []
-        removed_prefix = False
-        for t in raw_lines:
-            if not removed_prefix:
-                m = re.match(rf"^{qno}\.\s*(.*)", t)
-                if m:
-                    cleaned.append(m.group(1).strip())
-                    removed_prefix = True
-                    continue
-            cleaned.append(t)
-
-        # Split options by line-leading markers.
-        stem_lines, options = [], {}
-        current_opt = None
-        for t in cleaned:
-            mo = re.match(r"^\s*[\(（]([ABCD])[\)）]\s*(.*)", t)
-            if mo:
-                current_opt = mo.group(1)
-                options[current_opt] = mo.group(2).strip()
-            elif current_opt:
-                options[current_opt] = (options[current_opt] + " " + t).strip()
-            else:
-                stem_lines.append(t)
-        stem = "\n".join(stem_lines).strip()
-
+        stem, options = _region_text_and_options(page, y0, y1, qno)
         crop_rect = fitz.Rect(0, y0, page.rect.width, min(page.rect.height, y1))
-        cpix = page.get_pixmap(matrix=fitz.Matrix(1.55,1.55), clip=crop_rect, alpha=False)
+        cpix = page.get_pixmap(matrix=fitz.Matrix(1.5,1.5), clip=crop_rect, alpha=False)
         crop = cpix.tobytes("png")
 
         visual = False
+        d = page.get_text("dict")
         for block in d.get("blocks", []):
             if block.get("type") == 1 and fitz.Rect(block.get("bbox")).intersects(crop_rect):
                 visual = True
@@ -258,7 +247,7 @@ def extract_questions(question_pdf: bytes) -> Tuple[List[Question], Dict[int, by
                      crop_png=crop, visual_mode=visual)
         for a,b in groups:
             if a <= qno <= b:
-                q.group_id = f"{a}-{b}"
+                q.group_id=f"{a}-{b}"
                 break
         questions.append(q)
 
@@ -470,17 +459,22 @@ with tab1:
     if st.button("建立／更新題庫", type="primary", disabled=not (qfile and afile and rfile)):
         with st.spinner("解析 PDF、題號、答案與通過率…"):
             qbytes = qfile.getvalue()
-            questions, page_images = extract_questions(qbytes)
             answers = parse_answers(afile.getvalue())
             rates = parse_pass_rates(rfile.getvalue())
+            expected_count = len(answers)
+            questions, page_images = extract_questions(qbytes, expected_count=expected_count)
             questions = merge_metadata(questions, answers, rates)
             st.session_state.questions = questions
             st.session_state.page_images = page_images
-        expected = max(answers.keys()) if answers else 0
-        if len(questions) == expected and expected:
-            st.success(f"完成：辨識 {len(questions)} 題；答案 {len(answers)} 題；通過率 {len(rates)} 題。題數與答案表一致。")
+        expected = len(answers)
+        found_nos = {q.source_no for q in questions}
+        expected_nos = set(range(1, expected+1))
+        missing = sorted(expected_nos - found_nos)
+        if len(questions) == expected and len(rates) == expected and not missing and expected:
+            st.success(f"完成：辨識 {len(questions)} 題；國文答案 {len(answers)} 題；國文通過率 {len(rates)} 題。1～{expected} 題完整。")
         else:
-            st.warning(f"解析完成，但需校對：辨識 {len(questions)} 題；答案表最大題號 {expected}；通過率 {len(rates)} 題。請先檢查題幹預覽。")
+            miss_text = "、".join(map(str,missing)) if missing else "無"
+            st.warning(f"解析完成但需校對：辨識 {len(questions)} 題；國文答案 {len(answers)} 題；國文通過率 {len(rates)} 題；缺題：{miss_text}。")
 
     if st.session_state.questions:
         data = []
