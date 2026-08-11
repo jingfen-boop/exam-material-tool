@@ -17,8 +17,9 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from pptx import Presentation
 
-APP_VERSION = "Web v3.0 詳解工作台＋範本套版"
+APP_VERSION = "Web v3.1 年度資料包＋詳解工作台"
 
 # -----------------------------
 # Models
@@ -33,6 +34,7 @@ class Question:
     pass_rate: Optional[float] = None
     category: str = ""
     explanation: str = ""
+    synthesis_notes: str = ""
     teaching_focus: str = ""
     teaching: str = ""
     note_strategy: str = ""
@@ -1167,21 +1169,243 @@ def parse_question_spec(spec: str, available_numbers):
 
 
 # -----------------------------
-# Explanation workbench reference library
+# Annual reference package / explanation workbench
 # -----------------------------
-def _load_reference_library():
+ABILITY_OPTIONS = ["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"]
+
+DEFAULT_STRATEGY_LIBRARY = {
+    "字詞辨識": {
+        "教學重點": "學生能辨識字音、字形、詞義、標點或語文知識，並能依語境正確判斷與運用。",
+        "教學步驟": (
+            "1. 引導學生讀題，圈出題幹中的作答關鍵詞，確認本題要判斷的是字音、字形、詞義、標點或語文知識。\n"
+            "2. 教師帶領學生逐項找出需要判斷的字詞／語文知識點，先說明其基本定義或用法，再回到完整句子中判讀。\n"
+            "3. 逐項比對選項：請學生說明每一選項正確或錯誤的具體原因；若為一字多義，需將字詞代回語境判斷，不只背單一字義。\n"
+            "4. 將容易混淆的字詞、讀音或概念進行對照整理，必要時搭配造句、同義／反義比較或錯字訂正。\n"
+            "5. 請學生口頭說明正確答案及排除其他選項的依據，最後整理可遷移到相似題型的判斷原則。"
+        ),
+        "筆記策略": "依本題建立「字詞／定義或讀音／本題語境／易混淆點／例句」對照表。"
+    },
+    "表層文意理解": {
+        "教學重點": "學生能從文本中定位明確訊息，劃記關鍵字句，並以原文證據檢核各選項。",
+        "教學步驟": (
+            "1. 引導學生讀題，圈出「最符合、最恰當、依本文」等限制詞，確認題目要求。\n"
+            "2. 依題目中的人物、事件、時間、因果或關鍵詞回到文本定位，劃記直接相關的句子。\n"
+            "3. 將題幹與文本切分成可比對的資訊單位，逐項對照 A～D：標記為「原文支持、原文相反、原文未提及」。\n"
+            "4. 排除與文本不符、偷換概念、擴大或縮小範圍的選項；要求學生指出原文證據而非只說『感覺比較像』。\n"
+            "5. 讓學生個別或分組說明答案與證據，若出現不同答案，再回到原文比對關鍵句。"
+        ),
+        "筆記策略": "使用「選項／文本證據／判斷理由」三欄表。"
+    },
+    "文意統整": {
+        "教學重點": "學生能整合段落或多則資料的重點，找出反覆或互相呼應的概念，形成整體理解。",
+        "教學步驟": (
+            "1. 先確認題目要找的是主旨、核心概念、共同點、關係或整體觀點，而非單一細節。\n"
+            "2. 依標點、段落或資料一／資料二切分文本，為每一部分寫下一句重點。\n"
+            "3. 圈畫不同段落中反覆出現、彼此呼應或具有上下位關係的關鍵詞句。\n"
+            "4. 將各部分重點往上統整成一個核心概念，再檢查這個概念能否同時涵蓋全文／各資料。\n"
+            "5. 逐項比對選項，排除只涵蓋局部資訊、把例子當主旨、過度延伸或與整體文意不符者。\n"
+            "6. 請學生用自己的話說出全文核心，再回頭驗證正確選項。"
+        ),
+        "筆記策略": "採「分段重點 → 共同關鍵詞 → 核心概念 → 正確選項」四層筆記。"
+    },
+    "推論理解": {
+        "教學重點": "學生能根據文本證據建立合理推論鏈，並區辨合理推論與過度推論。",
+        "教學步驟": (
+            "1. 確認題目要求推論的對象與限制條件，圈出『推論、最可能、可知』等關鍵詞。\n"
+            "2. 找出與每一選項相關的文本證據，先整理『文本已知』，再進一步思考『因此可以推得什麼』。\n"
+            "3. 以『證據 → 中間判斷 → 結論』建立推論鏈，要求每一步都能回到文本或資料支持。\n"
+            "4. 逐項檢查是否有文中未提及、因果顛倒、範圍擴大、把可能說成必然或加入外部常識等過度推論。\n"
+            "5. 請學生說明『我是從哪一句推到這個答案』，比較不同選項的推論距離與合理性。"
+        ),
+        "筆記策略": "使用「文本證據 → 推論過程 → 選項判斷」箭頭筆記。"
+    },
+    "分析評鑑": {
+        "教學重點": "學生能比較多文本、人物或觀點，分析論據與立場，並依證據進行比較與評判。",
+        "教學步驟": (
+            "1. 確認題目要比較的對象、觀點、主張或判準，避免一開始就混讀多則資料。\n"
+            "2. 分別整理各文本／人物的主要主張、理由與關鍵證據；先各自讀懂，再進行比較。\n"
+            "3. 建立比較表，標示相同點、相異點、因果關係或立場差異。\n"
+            "4. 逐項檢視選項是否準確反映資料關係，排除張冠李戴、偷換概念、只符合單一文本或證據不足者。\n"
+            "5. 請學生引用具體文本證據說明評判理由；若有不同答案，可用分組討論或辯證方式再次驗證。"
+        ),
+        "筆記策略": "使用「文本A／文本B／共同點／差異點／證據」比較表。"
+    },
+    "其他": {
+        "教學重點": "學生能辨識本題的核心作答任務，依題型選用適切策略，並以明確證據完成判斷。",
+        "教學步驟": (
+            "1. 明確圈出題目要求與限制條件。\n"
+            "2. 找出完成作答所需的關鍵資訊或知識點。\n"
+            "3. 依題型進行逐項比對、排除、分類或轉換。\n"
+            "4. 要求學生說明答案與依據，而非只報答案。\n"
+            "5. 整理本題可遷移到相似題目的解題原則。"
+        ),
+        "筆記策略": "依題型建立「關鍵資訊／判斷依據／結論」簡表。"
+    }
+}
+
+def _empty_reference_db(year=None):
+    return {
+        "format_version": "3.1",
+        "year": int(year) if year is not None else None,
+        "publisher": {"翰林": {}, "康軒": {}, "南一": {}},
+        "history_raw": {},
+        "strategy": DEFAULT_STRATEGY_LIBRARY,
+        "drafts": {}
+    }
+
+def _load_bundled_reference_library():
     path = Path(__file__).resolve().parent / "reference_library_v30.json"
     if not path.exists():
-        return {"publisher": {}, "strategy": {}, "history_raw": {}}
+        return _empty_reference_db(115)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        db = json.loads(path.read_text(encoding="utf-8"))
+        db.setdefault("format_version", "3.1")
+        db.setdefault("year", 115)
+        db.setdefault("publisher", {"翰林": {}, "康軒": {}, "南一": {}})
+        db.setdefault("history_raw", {})
+        db.setdefault("strategy", DEFAULT_STRATEGY_LIBRARY)
+        db.setdefault("drafts", {})
+        return db
     except Exception:
-        return {"publisher": {}, "strategy": {}, "history_raw": {}}
+        return _empty_reference_db(115)
+
+def _load_reference_library():
+    if "reference_db" in st.session_state and isinstance(st.session_state.reference_db, dict):
+        return st.session_state.reference_db
+    db = _load_bundled_reference_library()
+    st.session_state.reference_db = db
+    return db
+
+def _uploaded_file_text(uploaded):
+    """Parse annual reference files in Streamlit Cloud.
+    Supported directly: DOCX, PPTX, PDF, TXT.
+    Legacy .doc is intentionally not silently converted because cloud conversion is unreliable.
+    """
+    name = uploaded.name
+    ext = Path(name).suffix.lower()
+    data = uploaded.getvalue()
+
+    if ext == ".docx":
+        doc = Document(io.BytesIO(data))
+        parts = []
+        for p in doc.paragraphs:
+            if p.text.strip():
+                parts.append(p.text.strip())
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells]
+                if any(cells):
+                    parts.append(" | ".join(cells))
+        return "\n".join(parts)
+
+    if ext == ".pptx":
+        prs = Presentation(io.BytesIO(data))
+        parts = []
+        for i, slide in enumerate(prs.slides, 1):
+            slide_text = []
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text and shape.text.strip():
+                    slide_text.append(shape.text.strip())
+            if slide_text:
+                parts.append(f"[投影片{i}]\n" + "\n".join(slide_text))
+        return "\n".join(parts)
+
+    if ext == ".pdf":
+        return pdf_text(data)
+
+    if ext == ".txt":
+        return data.decode("utf-8", errors="ignore")
+
+    if ext == ".doc":
+        raise ValueError("舊式 .doc 無法在 Streamlit Cloud 穩定解析，請先在 Word 另存為 .docx 再上傳。")
+
+    raise ValueError(f"目前不支援 {ext}。")
+
+def _normalize_reference_text(s: str) -> str:
+    s = (s or "").replace("\x0b", "\n").replace("\r", "\n")
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+def _split_slides_by_question(text: str, expected_count=None):
+    """Prefer PPT slide boundaries when present; continuation slides are appended to the last question."""
+    chunks = re.split(r"(?=\[投影片\d+\])", text)
+    out = {}
+    current = None
+    for ch in chunks:
+        if not ch.strip():
+            continue
+        head = ch[:900]
+        matches = list(re.finditer(r"(?:^|\n)\s*(?:[（(]\s*[A-DＡ-Ｄ]?\s*[）)]\s*)?(\d{1,2})\s*[.．、]", head))
+        q = None
+        for m in matches:
+            cand = int(m.group(1))
+            if expected_count is None or 1 <= cand <= expected_count:
+                q = cand
+                break
+        if q is not None:
+            current = q
+            out.setdefault(str(q), "")
+            out[str(q)] += _normalize_reference_text(ch) + "\n"
+        elif current is not None and any(k in ch for k in ("解析", "詳解", "答案", "語譯")):
+            out[str(current)] += _normalize_reference_text(ch) + "\n"
+    return {k: v.strip() for k, v in out.items()}
+
+def _split_text_by_question(text: str, expected_count=None):
+    """Generic Word/PDF/TXT splitter.
+    Uses the first plausible monotonic question start for each question number.
+    """
+    text = _normalize_reference_text(text)
+    pat = re.compile(r"(?m)^\s*(?:[（(]\s*[A-DＡ-Ｄ　 ]*\s*[）)]\s*)?(\d{1,2})\s*[.．、]")
+    all_matches = list(pat.finditer(text))
+    chosen = []
+    next_expected = 1
+    for m in all_matches:
+        q = int(m.group(1))
+        if expected_count is not None and not (1 <= q <= expected_count):
+            continue
+        if q == next_expected:
+            chosen.append((q, m.start()))
+            next_expected += 1
+            if expected_count and next_expected > expected_count:
+                break
+    # If numbering did not begin cleanly at 1, fall back to first occurrence per number.
+    if not chosen:
+        seen = set()
+        for m in all_matches:
+            q = int(m.group(1))
+            if expected_count is not None and not (1 <= q <= expected_count):
+                continue
+            if q not in seen:
+                seen.add(q)
+                chosen.append((q, m.start()))
+        chosen.sort()
+    out = {}
+    for i, (q, pos) in enumerate(chosen):
+        end = chosen[i+1][1] if i + 1 < len(chosen) else len(text)
+        out[str(q)] = text[pos:end].strip()
+    return out
+
+def _parse_publisher_files(files, expected_count=None):
+    combined = {}
+    errors = []
+    for uploaded in files or []:
+        try:
+            raw = _uploaded_file_text(uploaded)
+            if "[投影片" in raw:
+                parsed = _split_slides_by_question(raw, expected_count)
+            else:
+                parsed = _split_text_by_question(raw, expected_count)
+            for q, block in parsed.items():
+                if block.strip():
+                    if q in combined:
+                        combined[q] += "\n\n" + block.strip()
+                    else:
+                        combined[q] = block.strip()
+        except Exception as e:
+            errors.append(f"{uploaded.name}：{e}")
+    return combined, errors
 
 def _publisher_analysis_only(block: str) -> str:
-    """Extract the explanation portion when headings are available.
-    Otherwise return the reference block intact so the user can judge it.
-    """
     block = (block or "").strip()
     for marker in ("試題解析：", "詳解：", "詳解 ", "解析："):
         if marker in block:
@@ -1190,55 +1414,78 @@ def _publisher_analysis_only(block: str) -> str:
                 return tail
     return block
 
-def _history_examples_for_category(refdb, category: str, limit=4):
-    """Show source-grounded historical excerpts around the same ability label."""
+def _history_examples_for_category(refdb, category: str, limit=6):
     if not category:
         return []
     out = []
     for source, raw in refdb.get("history_raw", {}).items():
-        pos = raw.find(category)
-        if pos < 0 and category == "表層文意理解":
-            pos = raw.find("表層文意")
-        if pos < 0:
+        keys = [category]
+        if category == "表層文意理解":
+            keys.append("表層文意")
+        positions = [raw.find(k) for k in keys if raw.find(k) >= 0]
+        if not positions:
             continue
-        # Prefer a nearby teaching-step section after the ability label.
+        pos = min(positions)
         teach = raw.find("【教學步驟】", pos)
-        if teach >= 0 and teach - pos < 4500:
-            start = max(0, pos - 350)
-            end = min(len(raw), teach + 1600)
+        if teach >= 0 and teach - pos < 5000:
+            start = max(0, pos - 450)
+            end = min(len(raw), teach + 2200)
         else:
-            start = max(0, pos - 350)
-            end = min(len(raw), pos + 1800)
-        excerpt = raw[start:end].strip()
-        out.append((source, excerpt))
+            start = max(0, pos - 450)
+            end = min(len(raw), pos + 2400)
+        out.append((source, raw[start:end].strip()))
         if len(out) >= limit:
             break
     return out
 
-def _draft_explanation_from_publishers(refdb, qno: int) -> str:
-    """Free/no-API initial draft: use the most detailed available publisher analysis
-    as an editable base. This is deliberately NOT presented as an AI synthesis.
-    """
-    candidates = []
-    for pub in ("翰林", "康軒", "南一"):
-        block = refdb.get("publisher", {}).get(pub, {}).get(str(qno), "")
-        ana = _publisher_analysis_only(block)
-        if ana:
-            candidates.append((len(ana), pub, ana))
-    if not candidates:
-        return ""
-    _, pub, ana = max(candidates)
-    return ana.strip()
-
 def _strategy_for_category(refdb, category: str):
-    return refdb.get("strategy", {}).get(category) or refdb.get("strategy", {}).get("其他", {})
+    return refdb.get("strategy", {}).get(category) or DEFAULT_STRATEGY_LIBRARY.get(category) or DEFAULT_STRATEGY_LIBRARY["其他"]
+
+def _annual_package_json(refdb):
+    return json.dumps(refdb, ensure_ascii=False, indent=2).encode("utf-8")
+
+def _drafts_from_questions(questions, year):
+    drafts = {}
+    for q in questions:
+        drafts[str(q.source_no)] = {
+            "category": q.category,
+            "synthesis_notes": q.synthesis_notes,
+            "explanation": q.explanation,
+            "teaching_focus": q.teaching_focus,
+            "teaching": q.teaching,
+            "note_strategy": q.note_strategy,
+            "reviewed": q.workbench_reviewed,
+        }
+    return {
+        "format_version": "3.1-drafts",
+        "year": int(year),
+        "drafts": drafts
+    }
+
+def _apply_drafts_to_questions(payload, questions):
+    drafts = payload.get("drafts", {}) if isinstance(payload, dict) else {}
+    qmap = {str(q.source_no): q for q in questions}
+    applied = 0
+    for no, d in drafts.items():
+        q = qmap.get(str(no))
+        if not q or not isinstance(d, dict):
+            continue
+        q.category = d.get("category", q.category)
+        q.synthesis_notes = d.get("synthesis_notes", q.synthesis_notes)
+        q.explanation = d.get("explanation", q.explanation)
+        q.teaching_focus = d.get("teaching_focus", q.teaching_focus)
+        q.teaching = d.get("teaching", q.teaching)
+        q.note_strategy = d.get("note_strategy", q.note_strategy)
+        q.workbench_reviewed = bool(d.get("reviewed", q.workbench_reviewed))
+        applied += 1
+    return applied
 
 # -----------------------------
 # Streamlit UI
 # -----------------------------
 st.set_page_config(page_title="會考教材產製工具", page_icon="📘", layout="wide")
 st.title("📘 會考教材產製工具")
-st.caption(f"{APP_VERSION}｜題本＋答案＋通過率 → 組題 → 詳解／教學 → Word")
+st.caption(f"{APP_VERSION}｜年度資料 → 題本＋答案＋通過率 → 組題 → 詳解／教學 → Word")
 
 if "questions" not in st.session_state:
     st.session_state.questions = []
@@ -1253,7 +1500,170 @@ with st.sidebar:
     st.subheader("免費版")
     st.caption("本版不使用任何外部 AI API，不需要 API Key，也不會產生 API 費用。")
 
-tab1, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 篩選組題", "③ 詳解工作台", "④ 產生 Word"])
+ref_tab, tab1, tab2, tab3, tab4 = st.tabs(["① 年度資料", "② 建立題庫", "③ 篩選組題", "④ 詳解工作台", "⑤ 產生 Word"])
+
+
+with ref_tab:
+    st.subheader(f"{int(st.session_state.year)} 年度參考資料")
+    st.caption(
+        "這一頁是為了讓程式可以跨年度延用。每一年只要換掉當年度三家出版社詳解與內部教師版參考，"
+        "不需要修改 Python 程式。"
+    )
+
+    refdb = _load_reference_library()
+    ref_year = refdb.get("year")
+    if ref_year == int(st.session_state.year):
+        st.success(f"目前載入的參考庫年度：{ref_year}")
+    else:
+        st.warning(
+            f"目前參考庫年度為 {ref_year or '未設定'}，與現在設定的 {int(st.session_state.year)} 年不同。"
+            "請建立或匯入本年度參考庫後，再進入詳解工作台。"
+        )
+
+    st.markdown("### A. 最快方式：匯入／匯出年度參考包")
+    package_upload = st.file_uploader(
+        "上傳以前建立好的年度參考包 JSON",
+        type=["json"],
+        key="annual_package_upload"
+    )
+    if st.button("載入年度參考包", disabled=not package_upload, key="load_annual_package"):
+        try:
+            db = json.loads(package_upload.getvalue().decode("utf-8"))
+            if "publisher" not in db or "history_raw" not in db:
+                raise ValueError("這不是有效的年度參考包。")
+            db.setdefault("strategy", DEFAULT_STRATEGY_LIBRARY)
+            db.setdefault("drafts", {})
+            st.session_state.reference_db = db
+            st.success(f"已載入 {db.get('year', '未標示年度')} 年度參考包。")
+            st.rerun()
+        except Exception as e:
+            st.error(f"載入失敗：{e}")
+
+    st.download_button(
+        "下載目前年度參考包 JSON",
+        data=_annual_package_json(refdb),
+        file_name=f"{int(st.session_state.year)}_會考詳解年度參考包.json",
+        mime="application/json",
+        use_container_width=True
+    )
+
+    st.divider()
+    st.markdown("### B. 第一次建立本年度參考包")
+    st.caption(
+        "三家出版社可上傳 DOCX、PPTX、PDF、TXT，可同一家多檔。"
+        "舊式 .doc 請先在 Word 另存為 .docx；這樣未來在 Streamlit Cloud 最穩定。"
+    )
+
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        hanlin_files = st.file_uploader(
+            "翰林詳解",
+            type=["docx", "pptx", "pdf", "txt", "doc"],
+            accept_multiple_files=True,
+            key="annual_hanlin"
+        )
+    with pc2:
+        kang_files = st.file_uploader(
+            "康軒詳解",
+            type=["docx", "pptx", "pdf", "txt", "doc"],
+            accept_multiple_files=True,
+            key="annual_kang"
+        )
+    with pc3:
+        nanyi_files = st.file_uploader(
+            "南一詳解",
+            type=["docx", "pptx", "pdf", "txt", "doc"],
+            accept_multiple_files=True,
+            key="annual_nanyi"
+        )
+
+    history_files = st.file_uploader(
+        "本團隊歷年教師版參考檔（可一次上傳多份）",
+        type=["docx", "pptx", "pdf", "txt", "doc"],
+        accept_multiple_files=True,
+        key="annual_history"
+    )
+
+    expected_for_refs = len(st.session_state.questions) if st.session_state.questions else None
+
+    if st.button(
+        "建立／更新本年度參考庫",
+        type="primary",
+        disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
+        key="build_annual_ref"
+    ):
+        newdb = _empty_reference_db(int(st.session_state.year))
+        all_errors = []
+
+        for pub, fileset in [("翰林", hanlin_files), ("康軒", kang_files), ("南一", nanyi_files)]:
+            parsed, errs = _parse_publisher_files(fileset, expected_for_refs)
+            newdb["publisher"][pub] = parsed
+            all_errors.extend(errs)
+
+        for uploaded in history_files or []:
+            try:
+                newdb["history_raw"][uploaded.name] = _normalize_reference_text(_uploaded_file_text(uploaded))
+            except Exception as e:
+                all_errors.append(f"{uploaded.name}：{e}")
+
+        # Preserve any existing integrated drafts only when they belong to the same year.
+        olddb = _load_reference_library()
+        if olddb.get("year") == int(st.session_state.year):
+            newdb["drafts"] = olddb.get("drafts", {})
+
+        st.session_state.reference_db = newdb
+        st.success(
+            "年度參考庫已建立。出版社題數："
+            + "／".join(f"{p}{len(newdb['publisher'][p])}題" for p in ("翰林","康軒","南一"))
+            + f"；內部參考 {len(newdb['history_raw'])} 份。"
+        )
+        if all_errors:
+            st.warning("以下檔案需處理：\n- " + "\n- ".join(all_errors))
+        st.rerun()
+
+    st.divider()
+    st.markdown("### C. 整合建議稿的年度保存")
+    st.caption(
+        "因本版不使用 AI/API，高品質的『三家綜合建議詳解＋教學步驟』建議由人工／ChatGPT完成後匯入。"
+        "這樣隔年只需更換資料包，不會把115年的內容硬套到其他年度。"
+    )
+
+    draft_upload = st.file_uploader(
+        "上傳整合建議稿 JSON（選填）",
+        type=["json"],
+        key="annual_draft_upload"
+    )
+    if st.button("匯入整合建議稿", disabled=not (draft_upload and st.session_state.questions), key="import_drafts"):
+        try:
+            payload = json.loads(draft_upload.getvalue().decode("utf-8"))
+            if payload.get("year") not in (None, int(st.session_state.year)):
+                st.warning(f"此整合稿標示年度為 {payload.get('year')}，請確認是否要用在目前年度。")
+            applied = _apply_drafts_to_questions(payload, st.session_state.questions)
+            st.success(f"已套用 {applied} 題整合建議稿。")
+        except Exception as e:
+            st.error(f"匯入失敗：{e}")
+
+    if st.session_state.questions:
+        st.download_button(
+            "下載目前已編輯的整合建議稿 JSON",
+            data=json.dumps(
+                _drafts_from_questions(st.session_state.questions, st.session_state.year),
+                ensure_ascii=False, indent=2
+            ).encode("utf-8"),
+            file_name=f"{int(st.session_state.year)}_教師版整合建議稿.json",
+            mime="application/json",
+            use_container_width=True
+        )
+
+    st.divider()
+    st.markdown("### 目前參考庫摘要")
+    active = _load_reference_library()
+    summary_rows = [
+        {"來源": p, "已辨識題數": len(active.get("publisher", {}).get(p, {}))}
+        for p in ("翰林", "康軒", "南一")
+    ]
+    summary_rows.append({"來源": "內部教師版參考檔", "已辨識題數": len(active.get("history_raw", {}))})
+    st.dataframe(summary_rows, hide_index=True, use_container_width=True)
 
 with tab1:
     st.subheader("上傳三份來源")
@@ -1496,16 +1906,21 @@ with tab3:
         st.info("請先建立題庫。")
     else:
         refdb = _load_reference_library()
+        if refdb.get("year") != int(st.session_state.year):
+            st.warning(
+                "目前年度參考庫與題本年度不同。建議先到「① 年度資料」建立／載入本年度參考包，"
+                "避免誤用其他年度出版社詳解。"
+            )
+
         selected_nums = [q.source_no for q in st.session_state.questions if q.selected]
         choices = selected_nums or [q.source_no for q in st.session_state.questions]
-
-        reviewed_count = sum(1 for q in st.session_state.questions if q.workbench_reviewed)
-        st.caption(f"教師詳解人工確認進度：{reviewed_count}/{len(st.session_state.questions)} 題")
-
         qno = st.selectbox("選擇題目", choices, key="workbench_qno")
         q = next(x for x in st.session_state.questions if x.source_no == qno)
 
-        left, right = st.columns([0.92, 1.08])
+        reviewed_count = sum(1 for x in st.session_state.questions if x.workbench_reviewed)
+        st.caption(f"教師詳解人工確認進度：{reviewed_count}/{len(st.session_state.questions)} 題")
+
+        left, right = st.columns([0.88, 1.12])
 
         with left:
             st.markdown(f"### 原第 {q.source_no} 題")
@@ -1514,7 +1929,7 @@ with tab3:
                 st.write(q.material)
             st.markdown("**題幹**")
             st.write(q.text)
-            for k,v in q.options.items():
+            for k, v in q.options.items():
                 st.write(f"({k}) {v}")
             st.caption(
                 f"官方答案：{q.answer or '—'}｜通過率："
@@ -1524,111 +1939,104 @@ with tab3:
                 st.image(q.crop_png, caption="原 PDF 題目區塊", use_container_width=True)
 
         with right:
-            st.markdown("### 一、三家出版社詳解")
-            pub_cols = st.columns(3)
-            for col, pub in zip(pub_cols, ["翰林", "康軒", "南一"]):
-                block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
-                with col:
-                    st.markdown(f"**{pub}**")
+            st.markdown("### 一、三家出版社原始詳解")
+            st.caption("此區只做來源並列，不會自動把不同出版社文字粗糙拼接成『建議詳解』。")
+            pub_tabs = st.tabs(["翰林", "康軒", "南一"])
+            for ptab, pub in zip(pub_tabs, ["翰林", "康軒", "南一"]):
+                with ptab:
+                    block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
                     if block:
                         st.text_area(
-                            f"{pub}參考內容",
+                            f"{pub}第{q.source_no}題",
                             value=block,
-                            height=290,
+                            height=330,
                             key=f"ref_{pub}_{qno}",
                             label_visibility="collapsed"
                         )
                     else:
-                        st.warning("此題目前未解析到出版社文字，請回原檔確認。")
+                        st.info("目前年度參考庫沒有辨識到這一題，請回「① 年度資料」檢查來源檔。")
 
-            st.markdown("### 二、歷年本團隊參考與能力類型")
-            ability_options = ["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"]
-            current = q.category if q.category in ability_options else "其他"
+            st.markdown("### 二、能力類型與歷年本團隊寫法")
+            current = q.category if q.category in ABILITY_OPTIONS else ""
             q.category = st.selectbox(
                 "能力類型",
-                ability_options,
-                index=ability_options.index(current),
+                ABILITY_OPTIONS,
+                index=ABILITY_OPTIONS.index(current),
                 key=f"cat_{qno}"
             )
 
-            strategy = _strategy_for_category(refdb, q.category)
+            strategy = _strategy_for_category(refdb, q.category or "其他")
             if q.category:
-                with st.expander("查看歷年同能力類型的教學框架", expanded=False):
-                    st.markdown("**整理出的共通教學重點**")
-                    st.write(strategy.get("教學重點", ""))
-                    st.markdown("**整理出的共通教學步驟**")
-                    st.write(strategy.get("教學步驟", ""))
-                    examples = _history_examples_for_category(refdb, q.category)
-                    if examples:
-                        st.markdown("**112～114 年原教師版摘錄**")
-                        for source, excerpt in examples:
-                            st.markdown(f"**{source}**")
-                            st.text_area(
-                                f"{source}_{qno}",
-                                value=excerpt,
-                                height=180,
-                                key=f"hist_{source}_{qno}",
-                                label_visibility="collapsed"
-                            )
+                st.markdown("**依本團隊歷年寫法整理的教學框架**")
+                st.info(strategy.get("教學重點", ""))
+                st.text_area(
+                    "詳細教學步驟框架",
+                    value=strategy.get("教學步驟", ""),
+                    height=250,
+                    key=f"strategy_preview_{qno}"
+                )
+                examples = _history_examples_for_category(refdb, q.category)
+                with st.expander(f"查看歷年原教師版摘錄（{len(examples)} 則）", expanded=False):
+                    if not examples:
+                        st.caption("目前年度參考包內沒有找到同能力類型文字。")
+                    for source, excerpt in examples:
+                        st.markdown(f"**{source}**")
+                        st.text_area(
+                            f"hist_{source}_{qno}",
+                            value=excerpt,
+                            height=220,
+                            key=f"hist_{source}_{qno}",
+                            label_visibility="collapsed"
+                        )
 
-            st.markdown("### 三、本次建議稿（可直接修改）")
+            st.markdown("### 三、三家比較筆記")
+            if f"syn_{qno}" not in st.session_state:
+                st.session_state[f"syn_{qno}"] = q.synthesis_notes
+            q.synthesis_notes = st.text_area(
+                "請先記下：三家共同核心、哪一家解釋較完整、哪些選項理由值得保留、哪些內容可刪。",
+                height=180,
+                key=f"syn_{qno}"
+            )
 
-            # Initialize widget state from question object.
-            for k, value in {
+            st.markdown("### 四、本次整合建議稿（人工可修改）")
+            st.caption(
+                "這裡不再把某一家出版社直接當成『建議稿』。"
+                "建議先完成上面的比較，再將人工／ChatGPT整合後的內容貼入。"
+            )
+
+            # Apply saved annual draft if available and the fields are still empty.
+            saved = refdb.get("drafts", {}).get(str(q.source_no), {})
+            if saved and not any([q.explanation, q.teaching_focus, q.teaching]):
+                q.category = saved.get("category", q.category)
+                q.synthesis_notes = saved.get("synthesis_notes", q.synthesis_notes)
+                q.explanation = saved.get("explanation", "")
+                q.teaching_focus = saved.get("teaching_focus", "")
+                q.teaching = saved.get("teaching", "")
+                q.note_strategy = saved.get("note_strategy", "")
+
+            for key, value in {
                 f"exp_{qno}": q.explanation,
                 f"focus_{qno}": q.teaching_focus,
                 f"teach_{qno}": q.teaching,
                 f"note_{qno}": q.note_strategy,
             }.items():
-                if k not in st.session_state:
-                    st.session_state[k] = value
+                if key not in st.session_state:
+                    st.session_state[key] = value
 
-            b1, b2 = st.columns(2)
-            with b1:
-                if st.button("帶入出版社解析初稿", use_container_width=True, key=f"draft_exp_{qno}"):
-                    draft = _draft_explanation_from_publishers(refdb, q.source_no)
-                    if draft:
-                        st.session_state[f"exp_{qno}"] = draft
-                        q.explanation = draft
-                        st.rerun()
-                    else:
-                        st.warning("目前沒有可帶入的出版社解析。")
-            with b2:
-                if st.button("帶入本團隊教學框架", use_container_width=True, key=f"draft_teach_{qno}"):
-                    strategy = _strategy_for_category(refdb, q.category)
-                    st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
-                    st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
-                    st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
-                    q.teaching_focus = st.session_state[f"focus_{qno}"]
-                    q.teaching = st.session_state[f"teach_{qno}"]
-                    q.note_strategy = st.session_state[f"note_{qno}"]
-                    st.rerun()
+            if st.button("套用本能力類型的詳細教學框架", key=f"apply_strategy_{qno}", use_container_width=True):
+                strategy = _strategy_for_category(refdb, q.category or "其他")
+                st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
+                st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
+                st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
+                q.teaching_focus = st.session_state[f"focus_{qno}"]
+                q.teaching = st.session_state[f"teach_{qno}"]
+                q.note_strategy = st.session_state[f"note_{qno}"]
+                st.rerun()
 
-            st.caption(
-                "以上兩個按鈕均為免費的規則式帶入，不使用 AI/API。"
-                "「出版社解析初稿」只是方便複製修改，不代表已完成三家綜合判斷。"
-            )
-
-            q.explanation = st.text_area(
-                "建議詳解",
-                height=260,
-                key=f"exp_{qno}"
-            )
-            q.teaching_focus = st.text_area(
-                "教學重點",
-                height=90,
-                key=f"focus_{qno}"
-            )
-            q.teaching = st.text_area(
-                "建議教學步驟",
-                height=230,
-                key=f"teach_{qno}"
-            )
-            q.note_strategy = st.text_area(
-                "筆記策略（選填）",
-                height=110,
-                key=f"note_{qno}"
-            )
+            q.explanation = st.text_area("建議詳解", height=300, key=f"exp_{qno}")
+            q.teaching_focus = st.text_area("教學重點", height=100, key=f"focus_{qno}")
+            q.teaching = st.text_area("建議教學步驟", height=300, key=f"teach_{qno}")
+            q.note_strategy = st.text_area("筆記策略（選填）", height=130, key=f"note_{qno}")
 
             q.workbench_reviewed = st.checkbox(
                 "本題詳解與教學步驟已人工確認",
@@ -1642,8 +2050,8 @@ with tab3:
             )
 
             st.info(
-                "建議工作方式：先比較三家出版社 → 查看歷年同能力類型 → "
-                "把你要的內容貼到『建議詳解／教學步驟』修改 → 人工確認。"
+                "跨年度原則：出版社詳解、內部教師版與整合建議稿都放在「年度資料包」，"
+                "Python 程式本身不綁定 115 年。隔年只更換資料包即可。"
             )
 
 with tab4:
