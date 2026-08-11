@@ -19,7 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v3.7 題庫優先流程＋題組完整總覽＋詳解工作台"
+APP_VERSION = "Web v3.8 修正年度參考庫解析錯誤＋題組完整總覽"
 
 # -----------------------------
 # Models
@@ -1428,6 +1428,56 @@ def _split_slides_by_question(text: str, expected_count=None):
                 pending_shared.append(normalized)
 
     return {k: v.strip() for k, v in out.items() if v.strip()}
+
+
+def _question_anchor_candidates(text: str, expected_count=None):
+    """找出出版社文件中的可能題號位置。
+
+    支援常見格式：
+    24.
+    24、
+    (24)
+    第24題
+    ( B ) 24.
+
+    這個函式只負責提供候選位置；實際題組中省略題號的情況，
+    仍由 PPT 題組範圍推論機制處理。
+    """
+    text = _normalize_reference_text(text)
+    max_q = expected_count or 99
+
+    patterns = [
+        # (B) 24. / 24. / 24、
+        re.compile(
+            r"(?mi)^\s*(?:[（(]\s*[A-DＡ-Ｄ]?\s*[）)]\s*)?"
+            r"(\d{1,2})\s*[.．、]\s*(?=\S|\n)"
+        ),
+        # (24)
+        re.compile(
+            r"(?mi)^\s*[（(]\s*(\d{1,2})\s*[）)]\s*(?=\S|\n)"
+        ),
+        # 第24題
+        re.compile(
+            r"(?mi)^\s*第\s*(\d{1,2})\s*題\s*[:：.．、]?"
+        ),
+    ]
+
+    found = []
+    seen = set()
+
+    for pat in patterns:
+        for m in pat.finditer(text):
+            qno = int(m.group(1))
+            if not (1 <= qno <= max_q):
+                continue
+            pos = m.start()
+            if pos in seen:
+                continue
+            seen.add(pos)
+            found.append((qno, pos))
+
+    return sorted(found, key=lambda x: x[1])
+
 
 def _recover_missing_question_blocks(text: str, missing_numbers, expected_count=None):
     """Recover irregular publisher headings without hard-coding a year's missing numbers."""
