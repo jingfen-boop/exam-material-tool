@@ -19,7 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v3.1 年度資料包＋詳解工作台"
+APP_VERSION = "Web v3.2 考題總覽＋年度資料包＋詳解工作台"
 
 # -----------------------------
 # Models
@@ -1485,7 +1485,7 @@ def _apply_drafts_to_questions(payload, questions):
 # -----------------------------
 st.set_page_config(page_title="會考教材產製工具", page_icon="📘", layout="wide")
 st.title("📘 會考教材產製工具")
-st.caption(f"{APP_VERSION}｜年度資料 → 題本＋答案＋通過率 → 組題 → 詳解／教學 → Word")
+st.caption(f"{APP_VERSION}｜年度資料 → 建立題庫 → 考題總覽 → 篩選組題 → 詳解／教學 → Word")
 
 if "questions" not in st.session_state:
     st.session_state.questions = []
@@ -1500,7 +1500,7 @@ with st.sidebar:
     st.subheader("免費版")
     st.caption("本版不使用任何外部 AI API，不需要 API Key，也不會產生 API 費用。")
 
-ref_tab, tab1, tab2, tab3, tab4 = st.tabs(["① 年度資料", "② 建立題庫", "③ 篩選組題", "④ 詳解工作台", "⑤ 產生 Word"])
+ref_tab, tab1, overview_tab, tab2, tab3, tab4 = st.tabs(["① 年度資料", "② 建立題庫", "③ 考題總覽", "④ 篩選組題", "⑤ 詳解工作台", "⑥ 產生 Word"])
 
 
 with ref_tab:
@@ -1804,6 +1804,159 @@ with tab1:
         reviewed_count = sum(1 for q in st.session_state.questions if q.reviewed)
         st.progress(reviewed_count / len(st.session_state.questions))
         st.caption(f"人工校對進度：{reviewed_count}/{len(st.session_state.questions)} 題。")
+
+
+with overview_tab:
+    st.subheader("考題總覽")
+    st.caption(
+        "在組題前先從這裡檢視所有題目。每題會同時顯示題目、選項、答案與通過率；"
+        "勾選「加入本次題本」後，可直接到下一頁「④ 篩選組題」做最後確認。"
+    )
+
+    if not st.session_state.questions:
+        st.info("請先到「② 建立題庫」上傳題本、官方答案與通過率資料。")
+    else:
+        questions = st.session_state.questions
+
+        # Filters
+        fc1, fc2, fc3, fc4 = st.columns([1.0, 1.0, 1.2, 1.0])
+        with fc1:
+            rate_filter = st.selectbox(
+                "通過率",
+                ["全部", "80%以上", "60%～79.9%", "60%以下"],
+                key="overview_rate_filter"
+            )
+        with fc2:
+            answer_filter = st.selectbox(
+                "答案",
+                ["全部", "A", "B", "C", "D"],
+                key="overview_answer_filter"
+            )
+        with fc3:
+            keyword = st.text_input(
+                "題目關鍵字",
+                placeholder="例如：文意、成語、人物…",
+                key="overview_keyword"
+            )
+        with fc4:
+            only_selected = st.checkbox(
+                "只看已選題目",
+                value=False,
+                key="overview_only_selected"
+            )
+
+        def _rate_ok(q):
+            if rate_filter == "全部":
+                return True
+            if q.pass_rate is None:
+                return False
+            r = float(q.pass_rate)
+            # parser may store 0~1 or 0~100
+            if r <= 1:
+                r *= 100
+            if rate_filter == "80%以上":
+                return r >= 80
+            if rate_filter == "60%～79.9%":
+                return 60 <= r < 80
+            if rate_filter == "60%以下":
+                return r < 60
+            return True
+
+        def _keyword_ok(q):
+            if not keyword.strip():
+                return True
+            hay = " ".join([
+                q.material or "", q.text or "",
+                " ".join((q.options or {}).values())
+            ])
+            return keyword.strip().lower() in hay.lower()
+
+        visible = [
+            q for q in questions
+            if _rate_ok(q)
+            and (answer_filter == "全部" or q.answer == answer_filter)
+            and _keyword_ok(q)
+            and (not only_selected or q.selected)
+        ]
+
+        selected_count = sum(1 for q in questions if q.selected)
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("全部題數", len(questions))
+        mc2.metric("目前顯示", len(visible))
+        mc3.metric("已選入題本", selected_count)
+
+        bc1, bc2, bc3 = st.columns(3)
+        if bc1.button("清除全部選取", key="overview_clear_all", use_container_width=True):
+            for q in questions:
+                q.selected = False
+            st.rerun()
+        if bc2.button("選取目前篩選結果", key="overview_select_visible", use_container_width=True):
+            visible_nos = {q.source_no for q in visible}
+            for q in questions:
+                if q.source_no in visible_nos:
+                    q.selected = True
+            st.rerun()
+        if bc3.button("取消目前篩選結果", key="overview_unselect_visible", use_container_width=True):
+            visible_nos = {q.source_no for q in visible}
+            for q in questions:
+                if q.source_no in visible_nos:
+                    q.selected = False
+            st.rerun()
+
+        st.divider()
+
+        if not visible:
+            st.warning("目前篩選條件下沒有題目。")
+        else:
+            for q in visible:
+                # Normalize display rate.
+                if q.pass_rate is None:
+                    rate_text = "—"
+                else:
+                    rr = float(q.pass_rate)
+                    if rr <= 1:
+                        rr *= 100
+                    rate_text = f"{rr:.1f}%"
+
+                card_left, card_right = st.columns([0.78, 0.22], vertical_alignment="top")
+                with card_left:
+                    st.markdown(f"### 第 {q.source_no} 題")
+                    if q.material and q.material.strip():
+                        st.markdown("**閱讀／共用材料**")
+                        st.write(q.material.strip())
+                    st.markdown("**題目**")
+                    st.write(q.text.strip() if q.text else "（題幹未辨識，請至建立題庫頁校對）")
+                    if q.options:
+                        for letter in ["A", "B", "C", "D"]:
+                            val = q.options.get(letter, "")
+                            if val and val.strip():
+                                st.write(f"({letter}) {val.strip()}")
+
+                with card_right:
+                    st.markdown("**題目資訊**")
+                    st.write(f"答案：**{q.answer or '—'}**")
+                    st.write(f"通過率：**{rate_text}**")
+                    if q.category:
+                        st.write(f"能力：{q.category}")
+                    q.selected = st.checkbox(
+                        "加入本次題本",
+                        value=q.selected,
+                        key=f"overview_select_{q.source_no}"
+                    )
+                    if q.visual_mode or (not q.text.strip()):
+                        st.caption("此題含圖片／複雜版面")
+
+                with st.expander("查看原題裁圖", expanded=False):
+                    if q.crop_png:
+                        st.image(q.crop_png, use_container_width=True)
+                    else:
+                        st.caption("目前沒有原題裁圖。")
+                st.divider()
+
+        st.info(
+            "建議操作：先利用通過率或關鍵字縮小範圍 → 逐題閱讀題目與答案 → "
+            "勾選適合的題目 → 再到「④ 篩選組題」確認題數與順序。"
+        )
 
 with tab2:
     if not st.session_state.questions:
