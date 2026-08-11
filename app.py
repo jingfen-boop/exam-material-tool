@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.3 逐題整合建議工作台"
+APP_VERSION = "Web v5.4 題組選題同步根本修正"
 
 # -----------------------------
 # Models
@@ -2364,6 +2364,36 @@ def _reset_fresh_bank_selection(questions):
 
 
 
+
+def _sync_group_widget_state_to_questions(questions):
+    """Make group checkbox state and Question.selected agree.
+
+    This also repairs sessions carried over from earlier versions where a group
+    checkbox could remain visibly checked while child q.selected flags were stale.
+    """
+    if not questions:
+        return
+
+    group_ids = {
+        (q.group_id or "").strip()
+        for q in questions
+        if (q.group_id or "").strip()
+    }
+
+    for gid in group_ids:
+        members = [q for q in questions if (q.group_id or "").strip() == gid]
+        key = f"overview_group_select_{gid}"
+
+        if key in st.session_state:
+            checked = bool(st.session_state[key])
+            for q in members:
+                q.selected = checked
+                st.session_state[f"sel_{q.source_no}"] = checked
+                st.session_state[f"overview_select_{q.source_no}"] = checked
+        else:
+            st.session_state[key] = all(q.selected for q in members)
+
+
 # -----------------------------
 # v5.3 source-grounded integrated draft builder
 # -----------------------------
@@ -2503,6 +2533,7 @@ def _build_annual_project_zip():
     """
     buf = io.BytesIO()
     questions = st.session_state.get("questions", [])
+    _sync_group_widget_state_to_questions(questions)
     refdb = st.session_state.get("reference_db", _empty_reference_db(st.session_state.get("year", 115)))
     sources = st.session_state.get("project_sources", {})
 
@@ -3418,6 +3449,7 @@ with tab2:
         )
 
         qs = st.session_state.questions
+        _sync_group_widget_state_to_questions(qs)
 
         # Keep groups intact: if any member is selected in overview, the whole group
         # becomes selected here. This matches the rule used by the overview.
@@ -3427,7 +3459,9 @@ with tab2:
         }
         for q in qs:
             if q.group_id and q.group_id in selected_group_ids:
-                q.selected = False
+                q.selected = True
+                st.session_state[f"sel_{q.source_no}"] = True
+                st.session_state[f"overview_select_{q.source_no}"] = True
 
         selected = [q for q in qs if q.selected]
 
@@ -3554,6 +3588,7 @@ with tab3:
                 "避免誤用其他年度出版社詳解。"
             )
 
+        _sync_group_widget_state_to_questions(st.session_state.questions)
         selected_nums = [q.source_no for q in st.session_state.questions if q.selected]
         choices = selected_nums or [q.source_no for q in st.session_state.questions]
         qno = st.selectbox("選擇題目", choices, key="workbench_qno")
@@ -3734,6 +3769,7 @@ with tab4:
         st.caption("若只想臨時輸出幾題，可直接在這裡輸入題號，不必回②重選。例如：3、3,8,10、1-10。")
         export_spec = st.text_input("本次輸出題號（留白＝使用②目前選取）", key="export_question_spec")
 
+        _sync_group_widget_state_to_questions(st.session_state.questions)
         selected = [q for q in st.session_state.questions if q.selected]
         export_questions = selected
 
