@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.1 年度專案 ZIP 永久保存＋版本升級免重設"
+APP_VERSION = "Web v5.3 逐題整合建議工作台"
 
 # -----------------------------
 # Models
@@ -2363,6 +2363,104 @@ def _reset_fresh_bank_selection(questions):
                 st.session_state[key] = False
 
 
+
+# -----------------------------
+# v5.3 source-grounded integrated draft builder
+# -----------------------------
+def _clean_ref_text(s, limit=1800):
+    s = re.sub(r"\s+", " ", str(s or "")).strip()
+    return s[:limit]
+
+def _publisher_blocks_for_question(refdb, qno):
+    out = {}
+    for pub in ("翰林", "康軒", "南一"):
+        block = refdb.get("publisher", {}).get(pub, {}).get(str(qno), "")
+        if block:
+            out[pub] = _clean_ref_text(block)
+    return out
+
+def _build_source_grounded_draft(refdb, q):
+    """Create an editable first draft using only parsed annual sources + team framework.
+
+    This is intentionally deterministic and does not pretend to be an LLM.
+    It preserves source wording as reference material, then adds a structured,
+    question-specific teaching scaffold based on the selected ability category.
+    """
+    pubs = _publisher_blocks_for_question(refdb, q.source_no)
+    strategy = _strategy_for_category(refdb, q.category or "其他")
+    hist = _history_examples_for_category(refdb, q.category) if q.category else []
+
+    if not pubs:
+        return None, "三家出版社目前都沒有辨識到本題，無法建立來源有據的整合初稿。"
+
+    answer = q.answer or "—"
+    stem = _clean_ref_text(q.text, 420)
+    material = _clean_ref_text(q.material, 500)
+
+    # Keep each publisher visible and attributable; do not silently invent a consensus.
+    source_lines = []
+    for pub in ("翰林", "康軒", "南一"):
+        if pub in pubs:
+            source_lines.append(f"【{pub}】{pubs[pub]}")
+
+    explanation = (
+        f"【本題判斷】\n"
+        f"本題答案為（{answer}）。作答時應先掌握題幹要求：{stem}\n\n"
+    )
+    if material:
+        explanation += (
+            "【閱讀依據】\n"
+            "先回到閱讀／共用材料定位與題幹直接相關的訊息，再比對各選項是否符合文意。\n\n"
+        )
+    explanation += (
+        "【三家出版社可參考的解題依據】\n"
+        + "\n\n".join(source_lines)
+        + "\n\n【整合時的修改原則】\n"
+          "保留三家對正確答案的核心判斷依據；重複說法合併，"
+          "並優先補足錯誤選項「錯在哪裡」及其與題幹／文本的落差。"
+    )
+
+    focus = strategy.get("教學重點", "").strip()
+    if not focus:
+        focus = f"引導學生辨識本題「{q.category or '其他'}」的核心作答任務，並以題幹與文本證據完成判斷。"
+
+    teaching = strategy.get("教學步驟", "").strip()
+    if not teaching:
+        teaching = (
+            "1. 讀題：圈出題幹的作答任務與限制詞。\n"
+            "2. 定位：回到文本／材料找出可直接支持判斷的關鍵資訊。\n"
+            "3. 比對：逐一檢查選項與文本證據是否一致。\n"
+            "4. 排除：指出錯誤選項與原文不符、過度推論或答非所問之處。\n"
+            "5. 統整：用一句話說明正確答案成立的依據。"
+        )
+
+    # Make the framework explicitly question-specific without inventing facts.
+    teaching = (
+        f"【本題任務】{stem}\n\n"
+        + teaching
+        + "\n\n【教師檢核】請學生說出「選這個答案的文本／題幹依據」，"
+          "而不只報出答案代號。"
+    )
+
+    note = strategy.get("筆記策略", "").strip()
+    if not note:
+        note = "可用「題幹關鍵詞 → 文本證據 → 選項判斷」三欄方式整理。"
+
+    synthesis = (
+        f"已辨識出版社來源：{'、'.join(pubs.keys())}。"
+        f"本題能力類型：{q.category or '尚未設定'}。"
+        f"另找到本團隊同能力類型歷年摘錄 {len(hist)} 則。"
+        "建議人工比較三家對正答依據、錯項排除與概念補充的差異後，再定稿。"
+    )
+
+    return {
+        "explanation": explanation,
+        "teaching_focus": focus,
+        "teaching": teaching,
+        "note_strategy": note,
+        "synthesis_notes": synthesis,
+    }, None
+
 # -----------------------------
 # v5.1 Annual project persistence
 # -----------------------------
@@ -2527,6 +2625,9 @@ def _load_annual_project_zip(zip_bytes: bytes):
         for q in questions:
             st.session_state[f"sel_{q.source_no}"] = bool(q.selected)
             st.session_state[f"overview_select_{q.source_no}"] = bool(q.selected)
+        for gid in {q.group_id for q in questions if (q.group_id or "").strip()}:
+            members = [q for q in questions if (q.group_id or "").strip() == gid]
+            st.session_state[f"overview_group_select_{gid}"] = all(q.selected for q in members)
 
         # Page images are optional; question crops are enough for normal workflow.
         st.session_state.page_images = {}
@@ -3096,13 +3197,21 @@ with overview_tab:
             for q in questions:
                 q.selected = False
                 st.session_state[f"sel_{q.source_no}"] = False
+                st.session_state[f"overview_select_{q.source_no}"] = False
+            for gid in {x.group_id for x in questions if (x.group_id or "").strip()}:
+                st.session_state[f"overview_group_select_{gid}"] = False
             st.rerun()
 
         if bc2.button("選取目前顯示結果", key="overview_select_visible", use_container_width=True):
             for q in questions:
                 if q.source_no in visible_question_nos:
-                    q.selected = False
+                    q.selected = True
                     st.session_state[f"sel_{q.source_no}"] = True
+                    st.session_state[f"overview_select_{q.source_no}"] = True
+            # Synchronize group-level checkboxes as well.
+            for gid in {x.group_id for x in questions if (x.group_id or "").strip()}:
+                members = [x for x in questions if (x.group_id or "").strip() == gid]
+                st.session_state[f"overview_group_select_{gid}"] = all(x.selected for x in members)
             st.rerun()
 
         if bc3.button("取消目前顯示結果", key="overview_unselect_visible", use_container_width=True):
@@ -3110,6 +3219,10 @@ with overview_tab:
                 if q.source_no in visible_question_nos:
                     q.selected = False
                     st.session_state[f"sel_{q.source_no}"] = False
+                    st.session_state[f"overview_select_{q.source_no}"] = False
+            for gid in {x.group_id for x in questions if (x.group_id or "").strip()}:
+                members = [x for x in questions if (x.group_id or "").strip() == gid]
+                st.session_state[f"overview_group_select_{gid}"] = all(x.selected for x in members)
             st.rerun()
 
         st.divider()
@@ -3172,16 +3285,29 @@ with overview_tab:
                     if some_selected and not all_selected:
                         st.warning("目前此題組只有部分子題被選取；題組題建議整組保留。")
 
+                    group_key = f"overview_group_select_{uid}"
+                    # On first render, initialize widget state from canonical Question.selected.
+                    if group_key not in st.session_state:
+                        st.session_state[group_key] = all_selected
+
+                    def _sync_overview_group_selection(
+                        gid=uid,
+                        member_nos=tuple(x.source_no for x in members),
+                        widget_key=group_key
+                    ):
+                        checked = bool(st.session_state.get(widget_key, False))
+                        for x in st.session_state.questions:
+                            if x.source_no in member_nos and (x.group_id or "").strip() == gid:
+                                x.selected = checked
+                                st.session_state[f"sel_{x.source_no}"] = checked
+                                st.session_state[f"overview_select_{x.source_no}"] = checked
+
                     group_select = st.checkbox(
                         f"整組加入本次題本（{len(members)} 題）",
-                        value=all_selected,
-                        key=f"overview_group_select_{uid}"
+                        key=group_key,
+                        on_change=_sync_overview_group_selection,
+                        help="勾選後立即把此題組所有子題同步加入；取消則整組移除。"
                     )
-                    if group_select != all_selected:
-                        for x in members:
-                            x.selected = group_select
-                            st.session_state[f"sel_{x.source_no}"] = group_select
-                        st.rerun()
 
                     # Render all subquestions together, each with answer and rate.
                     for x in members:
@@ -3242,10 +3368,26 @@ with overview_tab:
                         st.write(f"通過率：**{rate_text}**")
                         if q.category:
                             st.write(f"能力：{q.category}")
-                        q.selected = st.checkbox(
+                        single_key = f"overview_select_{q.source_no}"
+                        if single_key not in st.session_state:
+                            st.session_state[single_key] = bool(q.selected)
+
+                        def _sync_overview_single_selection(
+                            source_no=q.source_no,
+                            widget_key=single_key
+                        ):
+                            checked = bool(st.session_state.get(widget_key, False))
+                            for item in st.session_state.questions:
+                                if item.source_no == source_no:
+                                    item.selected = checked
+                                    st.session_state[f"sel_{source_no}"] = checked
+                                    break
+
+                        st.checkbox(
                             "加入本次題本",
-                            value=q.selected,
-                            key=f"overview_select_{q.source_no}"
+                            key=single_key,
+                            on_change=_sync_overview_single_selection,
+                            help="此勾選狀態會立即同步到④篩選組題、⑤詳解工作台、⑥Word與年度專案。"
                         )
 
                     status_text = "✅ 已校對" if q.reviewed else "⚠️ 待校對"
@@ -3500,8 +3642,9 @@ with tab3:
 
             st.markdown("### 四、本次整合建議稿（人工可修改）")
             st.caption(
-                "這裡不再把某一家出版社直接當成『建議稿』。"
-                "建議先完成上面的比較，再將人工／ChatGPT整合後的內容貼入。"
+                "可先按「✨ 產生本題整合建議初稿」自動帶入可修改內容。"
+                "初稿只使用本年度已解析的出版社資料與本團隊教學框架，不會把單一出版社直接當成最終答案；"
+                "請教師完成三家比較後再人工修訂定稿。"
             )
 
             # Apply saved annual draft if available and the fields are still empty.
@@ -3523,15 +3666,44 @@ with tab3:
                 if key not in st.session_state:
                     st.session_state[key] = value
 
-            if st.button("套用本能力類型的詳細教學框架", key=f"apply_strategy_{qno}", use_container_width=True):
-                strategy = _strategy_for_category(refdb, q.category or "其他")
-                st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
-                st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
-                st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
-                q.teaching_focus = st.session_state[f"focus_{qno}"]
-                q.teaching = st.session_state[f"teach_{qno}"]
-                q.note_strategy = st.session_state[f"note_{qno}"]
-                st.rerun()
+            draft_c1, draft_c2 = st.columns(2)
+            with draft_c1:
+                if st.button(
+                    "✨ 產生本題整合建議初稿",
+                    key=f"build_integrated_draft_{qno}",
+                    use_container_width=True,
+                    help="依本年度已解析的三家出版社詳解＋本團隊能力類型教學框架產生可修改初稿。此功能不使用外部 AI/API。"
+                ):
+                    draft, err = _build_source_grounded_draft(refdb, q)
+                    if err:
+                        st.error(err)
+                    else:
+                        st.session_state[f"exp_{qno}"] = draft["explanation"]
+                        st.session_state[f"focus_{qno}"] = draft["teaching_focus"]
+                        st.session_state[f"teach_{qno}"] = draft["teaching"]
+                        st.session_state[f"note_{qno}"] = draft["note_strategy"]
+                        st.session_state[f"syn_{qno}"] = draft["synthesis_notes"]
+                        q.explanation = draft["explanation"]
+                        q.teaching_focus = draft["teaching_focus"]
+                        q.teaching = draft["teaching"]
+                        q.note_strategy = draft["note_strategy"]
+                        q.synthesis_notes = draft["synthesis_notes"]
+                        st.rerun()
+
+            with draft_c2:
+                if st.button(
+                    "套用本能力類型的詳細教學框架",
+                    key=f"apply_strategy_{qno}",
+                    use_container_width=True
+                ):
+                    strategy = _strategy_for_category(refdb, q.category or "其他")
+                    st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
+                    st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
+                    st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
+                    q.teaching_focus = st.session_state[f"focus_{qno}"]
+                    q.teaching = st.session_state[f"teach_{qno}"]
+                    q.note_strategy = st.session_state[f"note_{qno}"]
+                    st.rerun()
 
             q.explanation = st.text_area("建議詳解", height=300, key=f"exp_{qno}")
             q.teaching_focus = st.text_area("教學重點", height=100, key=f"focus_{qno}")
