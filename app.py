@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.8 總覽選題同步＋組題確認流程"
+APP_VERSION = "Web v4.9 新題庫預設全不選＋保留專案選題"
 
 # -----------------------------
 # Models
@@ -52,7 +52,7 @@ class Question:
     image_pngs: list = None
     body_crop_png: bytes = b""
     render_mode: str = "自動"
-    selected: bool = True
+    selected: bool = False
 
     def __post_init__(self):
         if self.options is None:
@@ -2338,6 +2338,23 @@ def _render_question_review_editor(q, key_prefix="overview"):
             )
             st.rerun()
 
+
+def _reset_fresh_bank_selection(questions):
+    """v4.9: a newly created bank starts with no questions selected.
+
+    This helper must only be called after parsing/building a NEW bank.
+    Project JSON loading is intentionally excluded so saved selections survive.
+    """
+    for q in questions or []:
+        q.selected = False
+        # Clear only current-session overview checkbox state for this question.
+        for key in (
+            f"sel_{q.source_no}",
+            f"overview_select_{q.source_no}",
+        ):
+            if key in st.session_state:
+                st.session_state[key] = False
+
 # -----------------------------
 # Streamlit UI
 # -----------------------------
@@ -2347,6 +2364,7 @@ st.caption(f"{APP_VERSION}｜建立題庫 → 年度資料 → 考題總覽暨�
 
 if "questions" not in st.session_state:
     st.session_state.questions = []
+    _reset_fresh_bank_selection(st.session_state.questions)
 if "page_images" not in st.session_state:
     st.session_state.page_images = {}
 if "year" not in st.session_state:
@@ -2638,6 +2656,7 @@ with tab1:
             questions, page_images = extract_questions(qbytes, expected_count=expected_count)
             questions = merge_metadata(questions, answers, rates)
             st.session_state.questions = questions
+            _reset_fresh_bank_selection(st.session_state.questions)
             st.session_state.page_images = page_images
         expected = len(answers)
         found_nos = {q.source_no for q in questions}
@@ -2817,7 +2836,7 @@ with overview_tab:
         if bc2.button("選取目前顯示結果", key="overview_select_visible", use_container_width=True):
             for q in questions:
                 if q.source_no in visible_question_nos:
-                    q.selected = True
+                    q.selected = False
                     st.session_state[f"sel_{q.source_no}"] = True
             st.rerun()
 
@@ -3001,7 +3020,7 @@ with tab2:
         }
         for q in qs:
             if q.group_id and q.group_id in selected_group_ids:
-                q.selected = True
+                q.selected = False
 
         selected = [q for q in qs if q.selected]
 
