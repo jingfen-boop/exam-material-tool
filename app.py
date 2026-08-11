@@ -3,6 +3,7 @@ import io
 from pathlib import Path
 import os
 import re
+import difflib
 import json
 import zipfile
 from dataclasses import dataclass, asdict
@@ -19,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v3.9 題庫優先＋題組共用材料完整總覽"
+APP_VERSION = "Web v4.0 題庫內容比對出版社詳解＋題組完整總覽"
 
 # -----------------------------
 # Models
@@ -1613,14 +1614,166 @@ def _recover_missing_question_blocks(text: str, missing_numbers, expected_count=
     return recovered
 
 
-def _parse_publisher_files(files, expected_count=None):
-    """Parse/merge publisher files; DOCX and PPTX complement one another (v3.5)."""
+
+def _match_norm(s: str) -> str:
+    """Normalize Chinese question text for cross-file matching."""
+    s = (s or "").lower()
+    s = re.sub(r"[\s\u3000]+", "", s)
+    s = re.sub(r"[，。！？；：、,.!?;:「」『』（）()【】\[\]〈〉《》—－…．·_]+", "", s)
+    return s
+
+
+def _publisher_raw_chunks(raw: str):
+    """Create candidate chunks while preserving PPT slide boundaries when possible."""
+    raw = _normalize_reference_text(raw)
+    if "[投影片" in raw:
+        return [c.strip() for c in re.split(r"(?=\[投影片\d+\])", raw) if c.strip()]
+
+    # For Word/PDF/TXT, paragraph windows are safer than depending only on question numbering.
+    paras = [p.strip() for p in re.split(r"\n+", raw) if p.strip()]
+    chunks = []
+    for i in range(len(paras)):
+        # Use a moving window so a stem and its explanation can be matched even if they
+        # occupy adjacent paragraphs/table rows.
+        chunks.append("\n".join(paras[i:i+6]))
+    return chunks
+
+
+def _content_match_score(q, chunk: str):
+    """Score how strongly a publisher chunk corresponds to an official question."""
+    cn = _match_norm(chunk)
+    if not cn:
+        return 0.0
+
+    stem = _match_norm(getattr(q, "text", "") or "")
+    material = _match_norm(getattr(q, "material", "") or "")
+    options = [
+        _match_norm((getattr(q, "options", {}) or {}).get(k, ""))
+        for k in ("A", "B", "C", "D")
+    ]
+
+    score = 0.0
+
+    # Exact stem fragments are the strongest signal.
+    if stem:
+        probes = []
+        for n in (28, 22, 16, 12):
+            if len(stem) >= n:
+                probes.extend([stem[:n], stem[-n:]])
+        if any(p and p in cn for p in probes):
+            score += 1.2
+
+        # Longest common sequence is robust to minor punctuation/export differences.
+        m = difflib.SequenceMatcher(None, stem, cn).find_longest_match(
+            0, len(stem), 0, len(cn)
+        )
+        score += min(1.0, m.size / max(12, min(len(stem), 60)))
+
+    # Shared material helps especially for grouped reading questions.
+    if material and len(material) >= 20:
+        probe = material[:min(32, len(material))]
+        if probe in cn:
+            score += 0.35
+
+    # Options are useful when the question stem is short or numbering is omitted.
+    opt_hits = 0
+    for opt in options:
+        if len(opt) >= 6:
+            probe = opt[:min(18, len(opt))]
+            if probe in cn:
+                opt_hits += 1
+    score += min(0.8, opt_hits * 0.25)
+
+    # A chunk that contains explanation vocabulary is preferred as a reference block.
+    if any(k in chunk for k in ("詳解", "解析", "對應教材", "答案")):
+        score += 0.12
+
+    return score
+
+
+def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
+    """Recover missing publisher questions by matching their actual content.
+
+    This is the key v4.0 change: after the official question bank exists, we no longer
+    require the publisher to print a reliable question number. A missing/duplicated
+    number in DOCX/PPTX can still be aligned by the stem/options/material.
+    """
+    if not question_bank or not missing_numbers:
+        return {}
+
+    qmap = {int(q.source_no): q for q in question_bank}
+    all_candidates = []
+
+    for source_name, raw in raw_sources:
+        chunks = _publisher_raw_chunks(raw)
+        for idx, ch in enumerate(chunks):
+            all_candidates.append((source_name, idx, ch, chunks))
+
+    recovered = {}
+    used = set()
+
+    for qno in sorted(set(int(x) for x in missing_numbers)):
+        q = qmap.get(qno)
+        if q is None:
+            continue
+
+        ranked = []
+        for source_name, idx, ch, chunks in all_candidates:
+            score = _content_match_score(q, ch)
+            ranked.append((score, source_name, idx, ch, chunks))
+
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        if not ranked:
+            continue
+
+        score, source_name, idx, ch, chunks = ranked[0]
+
+        # Conservative threshold: do not fabricate a match just to make the count 42.
+        if score < 0.70:
+            continue
+
+        block_parts = [ch]
+
+        # In PPT exports the explanation can be on the immediately following slide.
+        # Append at most two continuation slides only when they look like explanation pages.
+        for j in range(idx + 1, min(idx + 3, len(chunks))):
+            nxt = chunks[j]
+            if any(k in nxt for k in ("詳解", "解析", "對應教材", "語譯")):
+                block_parts.append(nxt)
+            else:
+                break
+
+        recovered[str(qno)] = "\n\n".join(block_parts).strip()
+
+    return recovered
+
+
+def _parse_publisher_files(files, expected_count=None, question_bank=None):
+    """Parse and merge publisher files.
+
+    v4.0 uses three layers:
+    1. normal question-number parsing;
+    2. irregular-number recovery;
+    3. official-question-bank CONTENT matching for omitted/duplicated numbers.
+    """
     combined, errors, raw_sources = {}, [], []
+
     for uploaded in files or []:
         try:
             raw = _uploaded_file_text(uploaded)
             raw_sources.append((uploaded.name, raw))
-            parsed = _split_slides_by_question(raw, expected_count) if "[投影片" in raw else _split_text_by_question(raw, expected_count)
+
+            if "[投影片" in raw:
+                parsed = _split_slides_by_question(raw, expected_count)
+            else:
+                # Some older code paths may not have a reliable Word-number splitter.
+                # Number-anchor recovery below plus content matching is intentionally
+                # sufficient to complement the PPT/other files.
+                try:
+                    parsed = _split_text_by_question(raw, expected_count)
+                except Exception:
+                    parsed = {}
+
             for q, block in parsed.items():
                 block = (block or "").strip()
                 if not block:
@@ -1629,9 +1782,11 @@ def _parse_publisher_files(files, expected_count=None):
                     combined[q] += "\n\n" + block
                 elif q not in combined:
                     combined[q] = block
+
         except Exception as e:
             errors.append(f"{uploaded.name}：{e}")
 
+    # Layer 2: generic question-number-anchor recovery.
     if expected_count:
         missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
         for _, raw in raw_sources:
@@ -1641,6 +1796,17 @@ def _parse_publisher_files(files, expected_count=None):
             for q, block in recovered.items():
                 combined.setdefault(q, block.strip())
             missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
+
+        # Layer 3: match the actual official question content.
+        if missing and question_bank:
+            recovered = _recover_by_question_bank(
+                raw_sources,
+                missing,
+                question_bank
+            )
+            for q, block in recovered.items():
+                combined.setdefault(q, block.strip())
+
     return combined, errors
 
 def _publisher_analysis_only(block: str) -> str:
@@ -1813,7 +1979,7 @@ with ref_tab:
         all_errors = []
 
         for pub, fileset in [("翰林", hanlin_files), ("康軒", kang_files), ("南一", nanyi_files)]:
-            parsed, errs = _parse_publisher_files(fileset, expected_for_refs)
+            parsed, errs = _parse_publisher_files(fileset, expected_for_refs, st.session_state.questions)
             newdb["publisher"][pub] = parsed
             all_errors.extend(errs)
 
@@ -1847,7 +2013,7 @@ with ref_tab:
     # --------------------------------------------------
     st.markdown("## B. 檢查本年度參考庫")
     st.caption(
-        "建立後先在這裡確認資料是否完整，再下載年度 JSON。"
+        "建立後先在這裡確認資料是否完整。v4.0 會以「正式題庫內容」比對出版社詳解，不再只依賴出版社題號。確認完整後再下載年度 JSON。"
     )
 
     active = _load_reference_library()
