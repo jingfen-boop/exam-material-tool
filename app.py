@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.2 修正題庫 JSON 序列化＋Word 非法字元處理"
+APP_VERSION = "Web v4.3 考題總覽暨校對＋題組完整檢視"
 
 # -----------------------------
 # Models
@@ -1940,12 +1940,127 @@ def _json_safe(value):
     return str(value)
 
 
+
+def _render_question_review_editor(q, key_prefix="overview"):
+    """Inline structure-review editor used by the consolidated overview page."""
+    no = q.source_no
+
+    c1, c2 = st.columns([1.0, 1.05], vertical_alignment="top")
+
+    with c1:
+        st.markdown(f"**原 PDF｜第 {no} 題**")
+        st.caption(
+            f"原頁：{q.page_no}｜答案：{q.answer or '—'}｜"
+            f"通過率：{q.pass_rate if q.pass_rate is not None else '—'}"
+        )
+        if q.crop_png:
+            st.image(q.crop_png, caption="原 PDF 題目區塊", use_container_width=True)
+        else:
+            st.info("本題目前沒有原 PDF 裁圖。")
+
+    with c2:
+        material_edit = st.text_area(
+            "閱讀／共用材料（沒有可留白）",
+            value=q.material,
+            height=135,
+            key=f"{key_prefix}_material_{no}"
+        )
+        stem_edit = st.text_area(
+            "題幹",
+            value=q.text,
+            height=120,
+            key=f"{key_prefix}_stem_{no}"
+        )
+
+        o1, o2 = st.columns(2)
+        with o1:
+            oa = st.text_area(
+                "A", value=q.options.get("A", ""), height=76,
+                key=f"{key_prefix}_A_{no}"
+            )
+            oc = st.text_area(
+                "C", value=q.options.get("C", ""), height=76,
+                key=f"{key_prefix}_C_{no}"
+            )
+        with o2:
+            ob = st.text_area(
+                "B", value=q.options.get("B", ""), height=76,
+                key=f"{key_prefix}_B_{no}"
+            )
+            od = st.text_area(
+                "D", value=q.options.get("D", ""), height=76,
+                key=f"{key_prefix}_D_{no}"
+            )
+
+        group_edit = st.text_input(
+            "題組 ID（例如 21-23；非題組留白）",
+            value=q.group_id,
+            key=f"{key_prefix}_group_{no}"
+        )
+
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            render_choices = ["自動", "可編輯文字", "圖文混合", "整題圖像"]
+            current_render = q.render_mode if q.render_mode in render_choices else "自動"
+            render_edit = st.selectbox(
+                "本題輸出模式",
+                render_choices,
+                index=render_choices.index(current_render),
+                key=f"{key_prefix}_render_{no}",
+                help="整題圖像：題號與答案括弧維持可編輯，題目本體使用原 PDF 圖片。"
+            )
+
+            layout_choices = ["一般直列", "圖片在右", "圖片在上", "選項兩欄"]
+            current_layout = q.layout_style if q.layout_style in layout_choices else "一般直列"
+            layout_edit = st.selectbox(
+                "可編輯 Word 版型",
+                layout_choices,
+                index=layout_choices.index(current_layout),
+                key=f"{key_prefix}_layout_{no}"
+            )
+
+        with rc2:
+            include_image_edit = st.checkbox(
+                "可編輯版輸出獨立圖片",
+                value=q.include_image,
+                key=f"{key_prefix}_include_image_{no}"
+            )
+            visual_edit = st.checkbox(
+                "保留原 PDF 裁圖作為備用／原版型輸出",
+                value=q.visual_mode,
+                key=f"{key_prefix}_visual_{no}"
+            )
+            reviewed_edit = st.checkbox(
+                "本題內容已人工確認",
+                value=q.reviewed,
+                key=f"{key_prefix}_reviewed_{no}"
+            )
+
+        if _effective_render_mode(q) == "整題圖像":
+            st.info("本題目前採「整題圖像」，A～D 可不必另外重建；Word 會保留可編輯題號與答案括弧。")
+
+        if st.button(
+            "💾 儲存本題校對",
+            type="primary",
+            key=f"{key_prefix}_save_{no}",
+            use_container_width=True
+        ):
+            _apply_structure_edit(
+                q, material_edit, stem_edit, oa, ob, oc, od,
+                group_edit, visual_edit, reviewed_edit
+            )
+            q.render_mode = render_edit
+            q.layout_style = layout_edit
+            q.include_image = include_image_edit
+            st.success(f"第 {no} 題已儲存並更新總覽。")
+            st.rerun()
+
 # -----------------------------
 # Streamlit UI
 # -----------------------------
 st.set_page_config(page_title="會考教材產製工具", page_icon="📘", layout="wide")
 st.title("📘 會考教材產製工具")
-st.caption(f"{APP_VERSION}｜建立題庫 → 年度資料 → 考題總覽 → 篩選組題 → 詳解／教學 → Word")
+st.caption(f"{APP_VERSION}｜建立題庫 → 年度資料 → 考題總覽暨校對 → 篩選組題 → 詳解／教學 → Word")
 
 if "questions" not in st.session_state:
     st.session_state.questions = []
@@ -1960,7 +2075,7 @@ with st.sidebar:
     st.subheader("免費版")
     st.caption("本版不使用任何外部 AI API，不需要 API Key，也不會產生 API 費用。")
 
-tab1, ref_tab, overview_tab, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 年度資料", "③ 考題總覽", "④ 篩選組題", "⑤ 詳解工作台", "⑥ 產生 Word"])
+tab1, ref_tab, overview_tab, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 年度資料", "③ 考題總覽暨校對", "④ 篩選組題", "⑤ 詳解工作台", "⑥ 產生 Word"])
 
 
 with ref_tab:
@@ -2268,105 +2383,17 @@ with tab1:
             })
         st.dataframe(data, use_container_width=True, hide_index=True)
 
-        st.divider()
-        st.markdown("### 題目結構校對")
-        st.caption("免費版流程：左側看原 PDF 裁圖；右側人工修正共用材料、題幹、A–D、題組與版型。")
-        st.caption("左側看原 PDF 裁圖；右側可直接修正共用材料、題幹、A–D、題組與圖片模式。修正後按「儲存本題校對」。")
 
-        review_choices = [q.source_no for q in st.session_state.questions]
-        review_no = st.selectbox("選擇要校對的原題號", review_choices, key="review_qno")
-        rq = next(x for x in st.session_state.questions if x.source_no == review_no)
-
-        rc1, rc2 = st.columns([1.05, 1])
-        with rc1:
-            st.markdown(f"#### 原 PDF｜第 {rq.source_no} 題")
-            st.caption(f"原頁：{rq.page_no}｜答案：{rq.answer or '—'}｜通過率：{rq.pass_rate if rq.pass_rate is not None else '—'}")
-            if rq.crop_png:
-                st.image(rq.crop_png, caption="原 PDF 題目區塊", use_container_width=True)
-            else:
-                st.info("本題目前沒有裁圖。")
-
-        with rc2:
-            material_edit = st.text_area(
-                "閱讀／共用材料（沒有可留白）",
-                value=rq.material,
-                height=130,
-                key=f"review_material_{review_no}"
-            )
-            stem_edit = st.text_area(
-                "題幹",
-                value=rq.text,
-                height=120,
-                key=f"review_stem_{review_no}"
-            )
-            oa = st.text_area("A", value=rq.options.get("A",""), height=70, key=f"review_A_{review_no}")
-            ob = st.text_area("B", value=rq.options.get("B",""), height=70, key=f"review_B_{review_no}")
-            oc = st.text_area("C", value=rq.options.get("C",""), height=70, key=f"review_C_{review_no}")
-            od = st.text_area("D", value=rq.options.get("D",""), height=70, key=f"review_D_{review_no}")
-            group_edit = st.text_input(
-                "題組 ID（例如 21-23；非題組留白）",
-                value=rq.group_id,
-                key=f"review_group_{review_no}"
-            )
-            render_choices = ["自動", "可編輯文字", "圖文混合", "整題圖像"]
-            current_render = rq.render_mode if rq.render_mode in render_choices else "自動"
-            render_edit = st.selectbox(
-                "本題輸出模式",
-                render_choices,
-                index=render_choices.index(current_render),
-                key=f"review_render_{review_no}",
-                help="整題圖像：題號與答案括弧是可編輯文字，題目本體使用原 PDF 圖片；最適合第3題這類特殊排版。"
-            )
-            if _effective_render_mode(rq) == "整題圖像":
-                st.info("本題目前採「整題圖像」：不需要補 A–D。Word 會使用可編輯的（　）與新題號，題目本體保留原 PDF 排版。")
-
-            layout_choices = ["一般直列", "圖片在右", "圖片在上", "選項兩欄"]
-            current_layout = rq.layout_style if rq.layout_style in layout_choices else "一般直列"
-            layout_edit = st.selectbox(
-                "可編輯 Word 版型",
-                layout_choices,
-                index=layout_choices.index(current_layout),
-                key=f"review_layout_{review_no}",
-                help="一般直列適合純文字題；圖片在右適合題幹左、圖右；圖片在上適合大型圖表；選項兩欄適合短選項。"
-            )
-            include_image_edit = st.checkbox(
-                "可編輯版輸出獨立圖片",
-                value=rq.include_image,
-                key=f"review_include_image_{review_no}",
-                help="若原圖本身含有大量文字且你已手動把文字重建到題幹/選項，可取消，以避免文字重複。"
-            )
-            visual_edit = st.checkbox(
-                "保留原 PDF 裁圖作為備用／原版型輸出",
-                value=rq.visual_mode,
-                key=f"review_visual_{review_no}"
-            )
-            reviewed_edit = st.checkbox(
-                "本題內容已人工確認",
-                value=rq.reviewed,
-                key=f"review_done_{review_no}"
-            )
-
-            if st.button("💾 儲存本題校對", type="primary", key=f"save_review_{review_no}"):
-                _apply_structure_edit(
-                    rq, material_edit, stem_edit, oa, ob, oc, od,
-                    group_edit, visual_edit, reviewed_edit
-                )
-                rq.render_mode = render_edit
-                rq.layout_style = layout_edit
-                rq.include_image = include_image_edit
-                st.success(f"第 {rq.source_no} 題已儲存。")
-                st.rerun()
-
-        reviewed_count = sum(1 for q in st.session_state.questions if q.reviewed)
-        st.progress(reviewed_count / len(st.session_state.questions))
-        st.caption(f"人工校對進度：{reviewed_count}/{len(st.session_state.questions)} 題。")
-
+        st.info(
+            "題庫已建立。題目內容的人工檢查、修改與校對狀態，"
+            "統一到「③ 考題總覽暨校對」處理，避免同一題在兩個頁面重複操作。"
+        )
 
 with overview_tab:
-    st.subheader("考題總覽")
+    st.subheader("考題總覽暨校對")
     st.caption(
-        "在組題前先完整閱讀題目。一般單題逐題呈現；題組題會把「共用閱讀材料／頂端題幹＋全部子題」合併成一個完整大題組，"
-        "避免只看到子題而無法理解脈絡。"
+        "這一頁同時是題庫總覽與人工校對中心。先看完整題目／題組，發現內容需要修正時直接展開「編輯／校對」。"
+        "一般單題逐題呈現；題組題則合併「共用閱讀材料／頂端題幹＋全部子題」，避免脫離脈絡。"
     )
 
     if not st.session_state.questions:
@@ -2375,7 +2402,7 @@ with overview_tab:
         questions = st.session_state.questions
 
         # ---------- filters ----------
-        fc1, fc2, fc3, fc4 = st.columns([1.0, 1.0, 1.2, 1.0])
+        fc1, fc2, fc3, fc4, fc5 = st.columns([0.95, 0.8, 1.15, 1.0, 0.9])
         with fc1:
             rate_filter = st.selectbox(
                 "通過率",
@@ -2391,12 +2418,18 @@ with overview_tab:
         with fc3:
             keyword = st.text_input(
                 "題目／題組關鍵字",
-                placeholder="例如：文意、成語、人物、文章關鍵詞…",
+                placeholder="例如：文意、成語、人物…",
                 key="overview_keyword"
             )
         with fc4:
+            review_filter = st.selectbox(
+                "校對狀態",
+                ["全部", "待校對", "已校對", "題組題", "圖片／複雜版面"],
+                key="overview_review_filter"
+            )
+        with fc5:
             only_selected = st.checkbox(
-                "只看已選題目／題組",
+                "只看已選",
                 value=False,
                 key="overview_only_selected"
             )
@@ -2436,6 +2469,14 @@ with overview_tab:
                 return False
             if keyword.strip() and keyword.strip().lower() not in _question_haystack(q).lower():
                 return False
+            if review_filter == "待校對" and q.reviewed:
+                return False
+            if review_filter == "已校對" and not q.reviewed:
+                return False
+            if review_filter == "題組題" and not (q.group_id or "").strip():
+                return False
+            if review_filter == "圖片／複雜版面" and not (q.visual_mode or q.image_pngs or q.body_crop_png):
+                return False
             if only_selected and not q.selected:
                 return False
             return True
@@ -2469,10 +2510,19 @@ with overview_tab:
         }
 
         selected_count = sum(1 for q in questions if q.selected)
-        mc1, mc2, mc3 = st.columns(3)
+        reviewed_count = sum(1 for q in questions if q.reviewed)
+        group_count = len({q.group_id for q in questions if (q.group_id or "").strip()})
+        issue_count = sum(1 for q in questions if not q.reviewed)
+
+        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
         mc1.metric("全部題數", len(questions))
-        mc2.metric("目前顯示題數", len(visible_question_nos))
-        mc3.metric("已選入題本", selected_count)
+        mc2.metric("目前顯示", len(visible_question_nos))
+        mc3.metric("已校對", reviewed_count)
+        mc4.metric("待校對", issue_count)
+        mc5.metric("已選入題本", selected_count)
+
+        st.progress(reviewed_count / len(questions) if questions else 0)
+        st.caption(f"人工校對進度：{reviewed_count}/{len(questions)} 題｜題組：{group_count} 組")
 
         bc1, bc2, bc3 = st.columns(3)
         if bc1.button("清除全部選取", key="overview_clear_all", use_container_width=True):
@@ -2585,6 +2635,13 @@ with overview_tab:
                             if val and val.strip():
                                 st.write(f"({letter}) {val.strip()}")
 
+                        status_text = "✅ 已校對" if x.reviewed else "⚠️ 待校對"
+                        with st.expander(f"✏️ 編輯／校對第 {x.source_no} 題｜{status_text}", expanded=False):
+                            _render_question_review_editor(
+                                x,
+                                key_prefix=f"overview_group_{uid}"
+                            )
+
                     with st.expander("查看此題組原 PDF 裁圖", expanded=False):
                         for x in members:
                             if x.crop_png:
@@ -2624,6 +2681,10 @@ with overview_tab:
                             key=f"overview_select_{q.source_no}"
                         )
 
+                    status_text = "✅ 已校對" if q.reviewed else "⚠️ 待校對"
+                    with st.expander(f"✏️ 編輯／校對｜{status_text}", expanded=False):
+                        _render_question_review_editor(q, key_prefix="overview_single")
+
                     with st.expander("查看原題裁圖", expanded=False):
                         if q.crop_png:
                             st.image(q.crop_png, use_container_width=True)
@@ -2632,8 +2693,8 @@ with overview_tab:
                     st.divider()
 
         st.info(
-            "建議操作：先在總覽閱讀完整題目／題組 → 用通過率或關鍵字縮小範圍 → "
-            "整組或逐題勾選 → 再到「④ 篩選組題」確認最終題數。"
+            "建議操作：先利用「待校對」篩選逐題驗收 → 發現問題就地展開修改 → 全部校對完成後，"
+            "再利用通過率／關鍵字挑選題目 → 到「④ 篩選組題」做最後確認。"
         )
 
 with tab2:
