@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.1 修正 Word 非法字元錯誤＋題庫內容比對"
+APP_VERSION = "Web v4.2 修正題庫 JSON 序列化＋Word 非法字元處理"
 
 # -----------------------------
 # Models
@@ -1922,6 +1922,24 @@ def _apply_drafts_to_questions(payload, questions):
         applied += 1
     return applied
 
+
+def _json_safe(value):
+    """Recursively convert app state to JSON-safe values.
+
+    Bytes are intentionally omitted as empty strings because source-PDF crops are
+    reproducible artifacts, not canonical project data.
+    """
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return ""
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 # -----------------------------
 # Streamlit UI
 # -----------------------------
@@ -3023,15 +3041,19 @@ with tab4:
         project = []
         for q in st.session_state.questions:
             d = asdict(q)
+            # Binary image fields cannot be serialized directly to JSON.
+            # They are regenerated from the source PDF when the question bank is rebuilt,
+            # so project JSON intentionally stores text/metadata only.
             d["crop_png"] = ""
             d["image_pngs"] = []
             d["body_crop_png"] = ""
+            d["group_crop_pngs"] = []
             project.append(d)
-        project_json = json.dumps({
+        project_json = json.dumps(_json_safe({
             "version": APP_VERSION,
             "year": st.session_state.year,
             "questions": project
-        }, ensure_ascii=False, indent=2)
+        }), ensure_ascii=False, indent=2)
         st.download_button(
             "下載題庫/詳解 JSON",
             data=project_json.encode("utf-8"),
