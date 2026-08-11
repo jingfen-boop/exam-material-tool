@@ -19,7 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v3.4 出版社多檔互補＋缺題容錯＋詳解工作台"
+APP_VERSION = "Web v3.5 出版社多檔互補＋缺題容錯＋詳解工作台"
 
 # -----------------------------
 # Models
@@ -1350,136 +1350,177 @@ def _split_slides_by_question(text: str, expected_count=None):
             out[str(current)] += _normalize_reference_text(ch) + "\n"
     return {k: v.strip() for k, v in out.items()}
 
-def _split_text_by_question(text: str, expected_count=None):
-    """Generic Word/PDF/TXT splitter.
-    Uses the first plausible monotonic question start for each question number.
+def _question_anchor_candidates(text: str, expected_count=None):
+    """Return robust question-heading anchors used by publisher DOCX/PPTX parsers.
+
+    Supports headings such as `24.`, `(24)`, `第24題`, and answer-prefixed forms like
+    `( B ) 24.`.  It also tolerates publisher exports in which the number and the stem
+    are separated by a line break.  Obvious year/page/table numbers are filtered later
+    by sequence scoring rather than by hard-coded question numbers.
     """
     text = _normalize_reference_text(text)
-    pat = re.compile(r"(?m)^\s*(?:[（(]\s*[A-DＡ-Ｄ　 ]*\s*[）)]\s*)?(\d{1,2})\s*[.．、]")
-    all_matches = list(pat.finditer(text))
-    chosen = []
-    next_expected = 1
-    for m in all_matches:
-        q = int(m.group(1))
-        if expected_count is not None and not (1 <= q <= expected_count):
-            continue
-        if q == next_expected:
-            chosen.append((q, m.start()))
-            next_expected += 1
-            if expected_count and next_expected > expected_count:
-                break
-    # If numbering did not begin cleanly at 1, fall back to first occurrence per number.
-    if not chosen:
-        seen = set()
-        for m in all_matches:
+    max_q = expected_count or 99
+    patterns = [
+        re.compile(r"(?mi)^\s*(?:[（(]\s*[A-DＡ-Ｄ]?\s*[）)]\s*)?(\d{1,2})\s*[.．、]\s*(?=\S|\n)"),
+        re.compile(r"(?mi)^\s*[（(]\s*(\d{1,2})\s*[）)]\s*(?=\S|\n)"),
+        re.compile(r"(?mi)^\s*第\s*(\d{1,2})\s*題\s*[:：.．、]?"),
+    ]
+    found = []
+    seen_pos = set()
+    for pat in patterns:
+        for m in pat.finditer(text):
             q = int(m.group(1))
-            if expected_count is not None and not (1 <= q <= expected_count):
-                continue
-            if q not in seen:
-                seen.add(q)
-                chosen.append((q, m.start()))
-        chosen.sort()
-    out = {}
-    for i, (q, pos) in enumerate(chosen):
-        end = chosen[i+1][1] if i + 1 < len(chosen) else len(text)
-        out[str(q)] = text[pos:end].strip()
+            if 1 <= q <= max_q and m.start() not in seen_pos:
+                found.append((q, m.start()))
+                seen_pos.add(m.start())
+    return sorted(found, key=lambda x: x[1])
+
+
+def _best_monotonic_anchors(text: str, expected_count=None):
+    """Choose one plausible anchor per question without requiring a perfect 1..N run.
+
+    Publisher files often contain repeated question numbers in answer keys, tables of
+    contents, slide labels, or continuation pages.  Dynamic programming favours the
+    longest strictly increasing sequence and therefore survives a few irregularly
+    formatted headings instead of dropping all later questions.
+    """
+    cands = _question_anchor_candidates(text, expected_count)
+    if not cands:
+        return []
+    # For each question keep several occurrences; DP over position with q increasing.
+    dp = []
+    prev = []
+    for i, (q, pos) in enumerate(cands):
+        best, bp = 1, -1
+        for j in range(i):
+            qj, pj = cands[j]
+            if qj < q and dp[j] + 1 > best:
+                best, bp = dp[j] + 1, j
+        dp.append(best); prev.append(bp)
+    i = max(range(len(dp)), key=lambda k: (dp[k], cands[k][0]))
+    seq = []
+    while i >= 0:
+        seq.append(cands[i]); i = prev[i]
+    seq.reverse()
+    # Deduplicate by question, retaining the selected occurrence.
+    out = []
+    used = set()
+    for q, pos in seq:
+        if q not in used:
+            out.append((q, pos)); used.add(q)
     return out
 
-def _recover_missing_question_blocks(text: str, missing_numbers, expected_count=None):
-    """Second-pass recovery for publisher files whose question headings use irregular layouts.
 
-    This is deliberately conservative: a recovered number must appear near a line/slide
-    boundary in a question-like form. The next recognised question number becomes the end
-    boundary. This helps DOCX/PPTX files where a few headings do not follow the dominant
-    numbering style without hard-coding a particular year's missing questions.
-    """
+def _split_text_by_question(text: str, expected_count=None):
+    """Robust generic Word/PDF/TXT splitter (v3.5)."""
+    text = _normalize_reference_text(text)
+    chosen = _best_monotonic_anchors(text, expected_count)
+    out = {}
+    for i, (q, pos) in enumerate(chosen):
+        end = chosen[i + 1][1] if i + 1 < len(chosen) else len(text)
+        block = text[pos:end].strip()
+        if len(block) >= 20:
+            out[str(q)] = block
+    return out
+
+
+def _slide_question_numbers(ch: str, expected_count=None):
+    """Find plausible question numbers on one PPT slide."""
+    max_q = expected_count or 99
+    nums = []
+    # Prefer explicit numbered stems; then standalone slide question labels.
+    pats = [
+        re.compile(r"(?mi)^\s*(?:[（(]\s*[A-DＡ-Ｄ]?\s*[）)]\s*)?(\d{1,2})\s*[.．、]\s*\S"),
+        re.compile(r"(?mi)^\s*第\s*(\d{1,2})\s*題"),
+        re.compile(r"(?mi)^\s*(\d{1,2})\s*$"),
+    ]
+    for pat in pats:
+        for m in pat.finditer(ch):
+            q = int(m.group(1))
+            if 1 <= q <= max_q and q not in nums:
+                nums.append(q)
+        if nums:
+            break
+    return nums
+
+
+def _split_slides_by_question(text: str, expected_count=None):
+    """PPT-aware splitter that understands shared reading passages and continuation slides."""
+    chunks = [c for c in re.split(r"(?=\[投影片\d+\])", text) if c.strip()]
+    out = {}
+    current = None
+    pending_shared = []
+    for ch in chunks:
+        nums = _slide_question_numbers(ch, expected_count)
+        if nums:
+            q = nums[0]
+            # A new numbered question receives any immediately preceding shared passage.
+            prefix = "\n\n".join(pending_shared[-2:]) if pending_shared else ""
+            pending_shared = []
+            current = q
+            out.setdefault(str(q), "")
+            merged = (prefix + "\n\n" + _normalize_reference_text(ch)).strip() if prefix else _normalize_reference_text(ch)
+            if merged and merged not in out[str(q)]:
+                out[str(q)] += (("\n\n" if out[str(q)] else "") + merged)
+        elif current is not None and any(k in ch for k in ("解析", "詳解", "答案", "語譯", "對應教材")):
+            block = _normalize_reference_text(ch)
+            if block and block not in out.get(str(current), ""):
+                out.setdefault(str(current), "")
+                out[str(current)] += "\n\n" + block
+        else:
+            # Keep likely shared-passage slides available for the next question.
+            if len(ch.strip()) >= 60:
+                pending_shared.append(_normalize_reference_text(ch))
+    return {k: v.strip() for k, v in out.items() if v.strip()}
+
+
+def _recover_missing_question_blocks(text: str, missing_numbers, expected_count=None):
+    """Recover irregular publisher headings without hard-coding a year's missing numbers."""
     text = _normalize_reference_text(text)
     if not text or not missing_numbers:
         return {}
-
-    max_q = expected_count or max(missing_numbers)
-    # Accept common publisher heading forms: 24. / 24、 / 24） / (24) / 第24題 / 題24.
-    anchor = re.compile(
-        r"(?mi)(?:^|\n)\s*(?:"
-        r"第\s*(\d{1,2})\s*題"
-        r"|題\s*(\d{1,2})\s*[.．、:：]?"
-        r"|[（(]?\s*(\d{1,2})\s*[）)]\s*[.．、:：]?"
-        r"|(\d{1,2})\s*[.．、:：]"
-        r")"
-    )
-    anchors = []
-    for m in anchor.finditer(text):
-        vals = [g for g in m.groups() if g]
-        if not vals:
-            continue
-        q = int(vals[0])
-        if 1 <= q <= max_q:
-            anchors.append((q, m.start()))
-
+    anchors = _question_anchor_candidates(text, expected_count)
     recovered = {}
     for q in sorted(set(int(x) for x in missing_numbers)):
         candidates = [(qq, pos) for qq, pos in anchors if qq == q]
-        if not candidates:
-            continue
-        # Prefer the occurrence whose following anchor is a plausible later question.
         for _, pos in candidates:
-            later = [(qq, p) for qq, p in anchors if p > pos and qq != q]
-            end = min((p for qq, p in later if qq > q), default=len(text))
+            later_positions = [p for qq, p in anchors if p > pos and qq > q]
+            end = min(later_positions, default=len(text))
             block = text[pos:end].strip()
-            # Reject tiny false positives such as answer keys or isolated page numbers.
-            if len(block) >= 40:
+            if len(block) >= 40 and any(k in block for k in ("詳解", "解析", "對應教材", "(A)", "（A）", "答案")):
                 recovered[str(q)] = block
                 break
     return recovered
 
 
 def _parse_publisher_files(files, expected_count=None):
-    """Parse and merge all files from one publisher.
-
-    v3.4 uses two passes. First it applies the normal DOCX/PPTX splitter. Then, when an
-    expected question count is known, it revisits every uploaded file only for missing
-    question numbers. Results from Word and PowerPoint are merged rather than replacing
-    one another, so the two formats can complement each other.
-    """
-    combined = {}
-    errors = []
-    raw_sources = []
-
+    """Parse/merge publisher files; DOCX and PPTX complement one another (v3.5)."""
+    combined, errors, raw_sources = {}, [], []
     for uploaded in files or []:
         try:
             raw = _uploaded_file_text(uploaded)
             raw_sources.append((uploaded.name, raw))
-            if "[投影片" in raw:
-                parsed = _split_slides_by_question(raw, expected_count)
-            else:
-                parsed = _split_text_by_question(raw, expected_count)
-
+            parsed = _split_slides_by_question(raw, expected_count) if "[投影片" in raw else _split_text_by_question(raw, expected_count)
             for q, block in parsed.items():
                 block = (block or "").strip()
                 if not block:
                     continue
-                if q in combined:
-                    # Avoid exact duplicate blocks while preserving complementary detail.
-                    if block not in combined[q]:
-                        combined[q] += "\n\n" + block
-                else:
+                if q in combined and block not in combined[q]:
+                    combined[q] += "\n\n" + block
+                elif q not in combined:
                     combined[q] = block
         except Exception as e:
             errors.append(f"{uploaded.name}：{e}")
 
-    # Second pass: recover only genuinely missing questions from every source.
     if expected_count:
         missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
-        if missing:
-            for source_name, raw in raw_sources:
-                recovered = _recover_missing_question_blocks(raw, missing, expected_count)
-                for q, block in recovered.items():
-                    if q not in combined and block.strip():
-                        combined[q] = block.strip()
-                missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
-                if not missing:
-                    break
-
+        for _, raw in raw_sources:
+            if not missing:
+                break
+            recovered = _recover_missing_question_blocks(raw, missing, expected_count)
+            for q, block in recovered.items():
+                combined.setdefault(q, block.strip())
+            missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
     return combined, errors
 
 def _publisher_analysis_only(block: str) -> str:
