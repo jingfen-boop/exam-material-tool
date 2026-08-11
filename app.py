@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.4 同行選項自動拆分＋考題總覽暨校對"
+APP_VERSION = "Web v4.5 可編輯校對＋持久儲存＋題組材料同步"
 
 # -----------------------------
 # Models
@@ -2016,8 +2016,44 @@ def _json_safe(value):
 
 
 def _render_question_review_editor(q, key_prefix="overview"):
-    """Inline structure-review editor used by the consolidated overview page."""
+    """True editable structure-review editor.
+
+    v4.5 deliberately initializes widget values in session_state instead of
+    repeatedly passing `value=`. This prevents a rerun from visually restoring
+    the parsed source text while the user is editing.
+    """
     no = q.source_no
+
+    def _wk(field):
+        return f"{key_prefix}_{field}_{no}"
+
+    # Initialize once. After that Streamlit owns the live editable value.
+    initial = {
+        _wk("material"): q.material or "",
+        _wk("stem"): q.text or "",
+        _wk("A"): (q.options or {}).get("A", ""),
+        _wk("B"): (q.options or {}).get("B", ""),
+        _wk("C"): (q.options or {}).get("C", ""),
+        _wk("D"): (q.options or {}).get("D", ""),
+        _wk("group"): q.group_id or "",
+        _wk("include_image"): bool(q.include_image),
+        _wk("visual"): bool(q.visual_mode),
+        _wk("reviewed"): bool(q.reviewed),
+    }
+    for k, v in initial.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    render_choices = ["自動", "可編輯文字", "圖文混合", "整題圖像"]
+    layout_choices = ["一般直列", "圖片在右", "圖片在上", "選項兩欄"]
+    if _wk("render") not in st.session_state:
+        st.session_state[_wk("render")] = (
+            q.render_mode if q.render_mode in render_choices else "自動"
+        )
+    if _wk("layout") not in st.session_state:
+        st.session_state[_wk("layout")] = (
+            q.layout_style if q.layout_style in layout_choices else "一般直列"
+        )
 
     c1, c2 = st.columns([1.0, 1.05], vertical_alignment="top")
 
@@ -2033,92 +2069,111 @@ def _render_question_review_editor(q, key_prefix="overview"):
             st.info("本題目前沒有原 PDF 裁圖。")
 
     with c2:
+        st.caption("右側為可編輯校對區；修改後請按最下方「💾 儲存本題校對」。")
+
         material_edit = st.text_area(
             "閱讀／共用材料（沒有可留白）",
-            value=q.material,
             height=135,
-            key=f"{key_prefix}_material_{no}"
+            key=_wk("material"),
+            disabled=False
         )
         stem_edit = st.text_area(
             "題幹",
-            value=q.text,
             height=120,
-            key=f"{key_prefix}_stem_{no}"
+            key=_wk("stem"),
+            disabled=False
         )
 
         o1, o2 = st.columns(2)
         with o1:
-            oa = st.text_area(
-                "A", value=q.options.get("A", ""), height=76,
-                key=f"{key_prefix}_A_{no}"
-            )
-            oc = st.text_area(
-                "C", value=q.options.get("C", ""), height=76,
-                key=f"{key_prefix}_C_{no}"
-            )
+            oa = st.text_area("A", height=76, key=_wk("A"), disabled=False)
+            oc = st.text_area("C", height=76, key=_wk("C"), disabled=False)
         with o2:
-            ob = st.text_area(
-                "B", value=q.options.get("B", ""), height=76,
-                key=f"{key_prefix}_B_{no}"
-            )
-            od = st.text_area(
-                "D", value=q.options.get("D", ""), height=76,
-                key=f"{key_prefix}_D_{no}"
-            )
+            ob = st.text_area("B", height=76, key=_wk("B"), disabled=False)
+            od = st.text_area("D", height=76, key=_wk("D"), disabled=False)
 
         group_edit = st.text_input(
             "題組 ID（例如 21-23；非題組留白）",
-            value=q.group_id,
-            key=f"{key_prefix}_group_{no}"
+            key=_wk("group"),
+            disabled=False
         )
 
         rc1, rc2 = st.columns(2)
         with rc1:
-            render_choices = ["自動", "可編輯文字", "圖文混合", "整題圖像"]
-            current_render = q.render_mode if q.render_mode in render_choices else "自動"
             render_edit = st.selectbox(
                 "本題輸出模式",
                 render_choices,
-                index=render_choices.index(current_render),
-                key=f"{key_prefix}_render_{no}",
+                key=_wk("render"),
                 help="整題圖像：題號與答案括弧維持可編輯，題目本體使用原 PDF 圖片。"
             )
-
-            layout_choices = ["一般直列", "圖片在右", "圖片在上", "選項兩欄"]
-            current_layout = q.layout_style if q.layout_style in layout_choices else "一般直列"
             layout_edit = st.selectbox(
                 "可編輯 Word 版型",
                 layout_choices,
-                index=layout_choices.index(current_layout),
-                key=f"{key_prefix}_layout_{no}"
+                key=_wk("layout")
             )
 
         with rc2:
             include_image_edit = st.checkbox(
                 "可編輯版輸出獨立圖片",
-                value=q.include_image,
-                key=f"{key_prefix}_include_image_{no}"
+                key=_wk("include_image")
             )
             visual_edit = st.checkbox(
                 "保留原 PDF 裁圖作為備用／原版型輸出",
-                value=q.visual_mode,
-                key=f"{key_prefix}_visual_{no}"
+                key=_wk("visual")
             )
             reviewed_edit = st.checkbox(
                 "本題內容已人工確認",
-                value=q.reviewed,
-                key=f"{key_prefix}_reviewed_{no}"
+                key=_wk("reviewed")
             )
 
-        if _effective_render_mode(q) == "整題圖像":
+        if render_edit == "整題圖像":
             st.info("本題目前採「整題圖像」，A～D 可不必另外重建；Word 會保留可編輯題號與答案括弧。")
 
-        if st.button(
-            "💾 儲存本題校對",
-            type="primary",
-            key=f"{key_prefix}_save_{no}",
-            use_container_width=True
-        ):
+        sync_group = False
+        if (group_edit or "").strip():
+            sync_group = st.checkbox(
+                "若修改共用材料，同步更新同一題組全部子題",
+                value=True,
+                key=_wk("sync_group"),
+                help="例如第26～29題共用同一篇閱讀材料時，只需校對一次。"
+            )
+
+        b1, b2 = st.columns([0.72, 0.28])
+        with b1:
+            save_clicked = st.button(
+                "💾 儲存本題校對",
+                type="primary",
+                key=_wk("save"),
+                use_container_width=True
+            )
+        with b2:
+            reset_clicked = st.button(
+                "↩️ 還原已儲存內容",
+                key=_wk("reset"),
+                use_container_width=True
+            )
+
+        if reset_clicked:
+            st.session_state[_wk("material")] = q.material or ""
+            st.session_state[_wk("stem")] = q.text or ""
+            for letter in ["A", "B", "C", "D"]:
+                st.session_state[_wk(letter)] = (q.options or {}).get(letter, "")
+            st.session_state[_wk("group")] = q.group_id or ""
+            st.session_state[_wk("render")] = (
+                q.render_mode if q.render_mode in render_choices else "自動"
+            )
+            st.session_state[_wk("layout")] = (
+                q.layout_style if q.layout_style in layout_choices else "一般直列"
+            )
+            st.session_state[_wk("include_image")] = bool(q.include_image)
+            st.session_state[_wk("visual")] = bool(q.visual_mode)
+            st.session_state[_wk("reviewed")] = bool(q.reviewed)
+            st.rerun()
+
+        if save_clicked:
+            old_group = q.group_id
+            new_material = material_edit.strip()
+
             _apply_structure_edit(
                 q, material_edit, stem_edit, oa, ob, oc, od,
                 group_edit, visual_edit, reviewed_edit
@@ -2126,7 +2181,22 @@ def _render_question_review_editor(q, key_prefix="overview"):
             q.render_mode = render_edit
             q.layout_style = layout_edit
             q.include_image = include_image_edit
-            st.success(f"第 {no} 題已儲存並更新總覽。")
+
+            # For a reading set, shared material is canonical across members.
+            if sync_group and q.group_id:
+                for other in st.session_state.questions:
+                    if other.source_no != q.source_no and other.group_id == q.group_id:
+                        other.material = new_material
+                        # Keep any already-open editor synchronized too.
+                        for prefix in ["overview_single"]:
+                            k = f"{prefix}_material_{other.source_no}"
+                            if k in st.session_state:
+                                st.session_state[k] = new_material
+
+            st.success(
+                f"第 {no} 題已儲存。"
+                + (" 同題組共用材料也已同步。" if sync_group and q.group_id else "")
+            )
             st.rerun()
 
 # -----------------------------
