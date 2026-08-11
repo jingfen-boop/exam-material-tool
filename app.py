@@ -19,7 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v3.5 出版社多檔互補＋缺題容錯＋詳解工作台"
+APP_VERSION = "Web v3.7 題庫優先流程＋題組完整總覽＋詳解工作台"
 
 # -----------------------------
 # Models
@@ -1326,153 +1326,108 @@ def _normalize_reference_text(s: str) -> str:
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
-def _split_slides_by_question(text: str, expected_count=None):
-    """Prefer PPT slide boundaries when present; continuation slides are appended to the last question."""
-    chunks = re.split(r"(?=\[投影片\d+\])", text)
-    out = {}
-    current = None
-    for ch in chunks:
-        if not ch.strip():
-            continue
-        head = ch[:900]
-        matches = list(re.finditer(r"(?:^|\n)\s*(?:[（(]\s*[A-DＡ-Ｄ]?\s*[）)]\s*)?(\d{1,2})\s*[.．、]", head))
-        q = None
-        for m in matches:
-            cand = int(m.group(1))
-            if expected_count is None or 1 <= cand <= expected_count:
-                q = cand
-                break
-        if q is not None:
-            current = q
-            out.setdefault(str(q), "")
-            out[str(q)] += _normalize_reference_text(ch) + "\n"
-        elif current is not None and any(k in ch for k in ("解析", "詳解", "答案", "語譯")):
-            out[str(current)] += _normalize_reference_text(ch) + "\n"
-    return {k: v.strip() for k, v in out.items()}
-
-def _question_anchor_candidates(text: str, expected_count=None):
-    """Return robust question-heading anchors used by publisher DOCX/PPTX parsers.
-
-    Supports headings such as `24.`, `(24)`, `第24題`, and answer-prefixed forms like
-    `( B ) 24.`.  It also tolerates publisher exports in which the number and the stem
-    are separated by a line break.  Obvious year/page/table numbers are filtered later
-    by sequence scoring rather than by hard-coded question numbers.
-    """
-    text = _normalize_reference_text(text)
+def _group_range_from_slide(ch: str, expected_count=None):
+    """Return an announced question range such as 回答24～25題 / 題組(24～42題)."""
     max_q = expected_count or 99
-    patterns = [
-        re.compile(r"(?mi)^\s*(?:[（(]\s*[A-DＡ-Ｄ]?\s*[）)]\s*)?(\d{1,2})\s*[.．、]\s*(?=\S|\n)"),
-        re.compile(r"(?mi)^\s*[（(]\s*(\d{1,2})\s*[）)]\s*(?=\S|\n)"),
-        re.compile(r"(?mi)^\s*第\s*(\d{1,2})\s*題\s*[:：.．、]?"),
-    ]
-    found = []
-    seen_pos = set()
-    for pat in patterns:
-        for m in pat.finditer(text):
-            q = int(m.group(1))
-            if 1 <= q <= max_q and m.start() not in seen_pos:
-                found.append((q, m.start()))
-                seen_pos.add(m.start())
-    return sorted(found, key=lambda x: x[1])
-
-
-def _best_monotonic_anchors(text: str, expected_count=None):
-    """Choose one plausible anchor per question without requiring a perfect 1..N run.
-
-    Publisher files often contain repeated question numbers in answer keys, tables of
-    contents, slide labels, or continuation pages.  Dynamic programming favours the
-    longest strictly increasing sequence and therefore survives a few irregularly
-    formatted headings instead of dropping all later questions.
-    """
-    cands = _question_anchor_candidates(text, expected_count)
-    if not cands:
-        return []
-    # For each question keep several occurrences; DP over position with q increasing.
-    dp = []
-    prev = []
-    for i, (q, pos) in enumerate(cands):
-        best, bp = 1, -1
-        for j in range(i):
-            qj, pj = cands[j]
-            if qj < q and dp[j] + 1 > best:
-                best, bp = dp[j] + 1, j
-        dp.append(best); prev.append(bp)
-    i = max(range(len(dp)), key=lambda k: (dp[k], cands[k][0]))
-    seq = []
-    while i >= 0:
-        seq.append(cands[i]); i = prev[i]
-    seq.reverse()
-    # Deduplicate by question, retaining the selected occurrence.
-    out = []
-    used = set()
-    for q, pos in seq:
-        if q not in used:
-            out.append((q, pos)); used.add(q)
-    return out
-
-
-def _split_text_by_question(text: str, expected_count=None):
-    """Robust generic Word/PDF/TXT splitter (v3.5)."""
-    text = _normalize_reference_text(text)
-    chosen = _best_monotonic_anchors(text, expected_count)
-    out = {}
-    for i, (q, pos) in enumerate(chosen):
-        end = chosen[i + 1][1] if i + 1 < len(chosen) else len(text)
-        block = text[pos:end].strip()
-        if len(block) >= 20:
-            out[str(q)] = block
-    return out
-
-
-def _slide_question_numbers(ch: str, expected_count=None):
-    """Find plausible question numbers on one PPT slide."""
-    max_q = expected_count or 99
-    nums = []
-    # Prefer explicit numbered stems; then standalone slide question labels.
+    # Only an explicit "回答X～Y題" passage heading drives sequential inference.
+    # Broad section labels such as "題組(24～42題)" or "單題(1～23題)" are NOT
+    # treated as one continuous group, otherwise they can mis-number later slides.
     pats = [
-        re.compile(r"(?mi)^\s*(?:[（(]\s*[A-DＡ-Ｄ]?\s*[）)]\s*)?(\d{1,2})\s*[.．、]\s*\S"),
-        re.compile(r"(?mi)^\s*第\s*(\d{1,2})\s*題"),
-        re.compile(r"(?mi)^\s*(\d{1,2})\s*$"),
+        re.compile(r"回答\s*[（(]?\s*(\d{1,2})\s*[～~\-－至]\s*(\d{1,2})\s*題"),
     ]
     for pat in pats:
-        for m in pat.finditer(ch):
-            q = int(m.group(1))
-            if 1 <= q <= max_q and q not in nums:
-                nums.append(q)
-        if nums:
-            break
-    return nums
+        m = pat.search(ch)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if 1 <= a <= b <= max_q:
+                return a, b
+    return None
+
+
+def _looks_like_question_slide(ch: str):
+    """Question slides usually contain an answer mark and/or A-D options."""
+    has_options = sum(token in ch for token in ("(A)", "(B)", "(C)", "(D)", "（A）", "（B）", "（C）", "（D）")) >= 2
+    # Publisher PPTs often place the answer as a standalone A/B/C/D line.
+    has_answer = bool(re.search(r"(?m)^\s*[A-DＡ-Ｄ]\s*$", ch))
+    return has_options or has_answer
 
 
 def _split_slides_by_question(text: str, expected_count=None):
-    """PPT-aware splitter that understands shared reading passages and continuation slides."""
+    """PPT-aware splitter with generic inference for group-question numbering.
+
+    Handles three recurring publisher-export cases:
+    1) a group passage announces "回答24～25題", but the first question slide omits "24.";
+    2) middle/last slides in a group omit their question number;
+    3) a publisher accidentally repeats the previous number (e.g. 41 twice for 41～42).
+    The inference is based on the announced range and slide order, not hard-coded question numbers.
+    """
     chunks = [c for c in re.split(r"(?=\[投影片\d+\])", text) if c.strip()]
     out = {}
     current = None
     pending_shared = []
+    active_range = None
+    next_group_q = None
+
     for ch in chunks:
-        nums = _slide_question_numbers(ch, expected_count)
-        if nums:
-            q = nums[0]
-            # A new numbered question receives any immediately preceding shared passage.
-            prefix = "\n\n".join(pending_shared[-2:]) if pending_shared else ""
+        normalized = _normalize_reference_text(ch)
+
+        announced = _group_range_from_slide(normalized, expected_count)
+        if announced:
+            active_range = announced
+            next_group_q = announced[0]
+            # Shared-passage slides are kept for the first question in the range.
+            if len(normalized) >= 60 and not _looks_like_question_slide(normalized):
+                pending_shared.append(normalized)
+                continue
+
+        nums = _slide_question_numbers(normalized, expected_count)
+        explicit_q = nums[0] if nums else None
+        q = explicit_q
+
+        if _looks_like_question_slide(normalized) and active_range:
+            lo, hi = active_range
+
+            # Accept an explicit number only if it fits the active range and does not move backward.
+            if q is not None and not (lo <= q <= hi):
+                q = None
+
+            # If the publisher repeats the preceding number or omits the number,
+            # use the next expected number in the announced group.
+            if next_group_q is not None:
+                if q is None or q < next_group_q:
+                    q = next_group_q
+                elif q > next_group_q:
+                    # Respect a valid forward jump, but the unnumbered earlier slide(s)
+                    # should already have consumed the missing number(s).
+                    pass
+
+            if q is not None and lo <= q <= hi:
+                next_group_q = q + 1
+                if next_group_q > hi:
+                    active_range = None
+                    next_group_q = None
+
+        if q is not None and _looks_like_question_slide(normalized):
+            prefix = "\n\n".join(pending_shared[-3:]) if pending_shared else ""
             pending_shared = []
             current = q
             out.setdefault(str(q), "")
-            merged = (prefix + "\n\n" + _normalize_reference_text(ch)).strip() if prefix else _normalize_reference_text(ch)
+            merged = (prefix + "\n\n" + normalized).strip() if prefix else normalized
             if merged and merged not in out[str(q)]:
                 out[str(q)] += (("\n\n" if out[str(q)] else "") + merged)
-        elif current is not None and any(k in ch for k in ("解析", "詳解", "答案", "語譯", "對應教材")):
-            block = _normalize_reference_text(ch)
-            if block and block not in out.get(str(current), ""):
-                out.setdefault(str(current), "")
-                out[str(current)] += "\n\n" + block
-        else:
-            # Keep likely shared-passage slides available for the next question.
-            if len(ch.strip()) >= 60:
-                pending_shared.append(_normalize_reference_text(ch))
-    return {k: v.strip() for k, v in out.items() if v.strip()}
+            continue
 
+        # Continuation/detail slide for the current question.
+        if current is not None and any(k in normalized for k in ("解析", "詳解", "答案", "語譯", "對應教材")):
+            if normalized and normalized not in out.get(str(current), ""):
+                out.setdefault(str(current), "")
+                out[str(current)] += "\n\n" + normalized
+        else:
+            # Likely shared passage or table/image description.
+            if len(normalized) >= 60:
+                pending_shared.append(normalized)
+
+    return {k: v.strip() for k, v in out.items() if v.strip()}
 
 def _recover_missing_question_blocks(text: str, missing_numbers, expected_count=None):
     """Recover irregular publisher headings without hard-coding a year's missing numbers."""
@@ -1603,7 +1558,7 @@ def _apply_drafts_to_questions(payload, questions):
 # -----------------------------
 st.set_page_config(page_title="會考教材產製工具", page_icon="📘", layout="wide")
 st.title("📘 會考教材產製工具")
-st.caption(f"{APP_VERSION}｜年度資料 → 建立題庫 → 考題總覽 → 篩選組題 → 詳解／教學 → Word")
+st.caption(f"{APP_VERSION}｜建立題庫 → 年度資料 → 考題總覽 → 篩選組題 → 詳解／教學 → Word")
 
 if "questions" not in st.session_state:
     st.session_state.questions = []
@@ -1618,13 +1573,13 @@ with st.sidebar:
     st.subheader("免費版")
     st.caption("本版不使用任何外部 AI API，不需要 API Key，也不會產生 API 費用。")
 
-ref_tab, tab1, overview_tab, tab2, tab3, tab4 = st.tabs(["① 年度資料", "② 建立題庫", "③ 考題總覽", "④ 篩選組題", "⑤ 詳解工作台", "⑥ 產生 Word"])
+tab1, ref_tab, overview_tab, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 年度資料", "③ 考題總覽", "④ 篩選組題", "⑤ 詳解工作台", "⑥ 產生 Word"])
 
 
 with ref_tab:
-    st.subheader(f"{int(st.session_state.year)} 年度資料")
+    st.subheader(f"{int(st.session_state.year)} 年度資料與詳解參考庫")
     st.caption(
-        "年度資料流程已改成：先建立 → 再檢查 → 再下載保存 → 之後可直接載入 → 最後管理整合成果。"
+        "建議先完成「① 建立題庫」，再建立出版社／內部詳解參考庫。這樣 B 區才能立即核對每家出版社是否完整對應本年度所有題目。"
     )
 
     refdb = _load_reference_library()
@@ -1774,7 +1729,7 @@ with ref_tab:
                 "至少一家出版社仍有缺題。建議先回 A 區補資料或改用較容易解析的 DOCX／PPTX，再進入 C 區保存。"
             )
     else:
-        st.info("若要檢查出版社是否缺題，請先到「② 建立題庫」建立本年度題庫。")
+        st.info("若要檢查出版社是否缺題，請先到「① 建立題庫」建立本年度題庫。")
 
     st.divider()
 
@@ -2023,16 +1978,16 @@ with tab1:
 with overview_tab:
     st.subheader("考題總覽")
     st.caption(
-        "在組題前先從這裡檢視所有題目。每題會同時顯示題目、選項、答案與通過率；"
-        "勾選「加入本次題本」後，可直接到下一頁「④ 篩選組題」做最後確認。"
+        "在組題前先完整閱讀題目。一般單題逐題呈現；題組題會把「共用閱讀材料／頂端題幹＋全部子題」合併成一個完整大題組，"
+        "避免只看到子題而無法理解脈絡。"
     )
 
     if not st.session_state.questions:
-        st.info("請先到「② 建立題庫」上傳題本、官方答案與通過率資料。")
+        st.info("請先到「① 建立題庫」上傳題本、官方答案與通過率資料。")
     else:
         questions = st.session_state.questions
 
-        # Filters
+        # ---------- filters ----------
         fc1, fc2, fc3, fc4 = st.columns([1.0, 1.0, 1.2, 1.0])
         with fc1:
             rate_filter = st.selectbox(
@@ -2048,26 +2003,29 @@ with overview_tab:
             )
         with fc3:
             keyword = st.text_input(
-                "題目關鍵字",
-                placeholder="例如：文意、成語、人物…",
+                "題目／題組關鍵字",
+                placeholder="例如：文意、成語、人物、文章關鍵詞…",
                 key="overview_keyword"
             )
         with fc4:
             only_selected = st.checkbox(
-                "只看已選題目",
+                "只看已選題目／題組",
                 value=False,
                 key="overview_only_selected"
             )
 
+        def _norm_rate(q):
+            if q.pass_rate is None:
+                return None
+            r = float(q.pass_rate)
+            return r * 100 if r <= 1 else r
+
         def _rate_ok(q):
+            r = _norm_rate(q)
             if rate_filter == "全部":
                 return True
-            if q.pass_rate is None:
+            if r is None:
                 return False
-            r = float(q.pass_rate)
-            # parser may store 0~1 or 0~100
-            if r <= 1:
-                r *= 100
             if rate_filter == "80%以上":
                 return r >= 80
             if rate_filter == "60%～79.9%":
@@ -2076,100 +2034,207 @@ with overview_tab:
                 return r < 60
             return True
 
-        def _keyword_ok(q):
-            if not keyword.strip():
-                return True
-            hay = " ".join([
-                q.material or "", q.text or "",
+        def _question_haystack(q):
+            return " ".join([
+                q.group_intro or "",
+                q.material or "",
+                q.text or "",
                 " ".join((q.options or {}).values())
             ])
-            return keyword.strip().lower() in hay.lower()
 
-        visible = [
-            q for q in questions
-            if _rate_ok(q)
-            and (answer_filter == "全部" or q.answer == answer_filter)
-            and _keyword_ok(q)
-            and (not only_selected or q.selected)
-        ]
+        def _question_matches(q):
+            if answer_filter != "全部" and q.answer != answer_filter:
+                return False
+            if not _rate_ok(q):
+                return False
+            if keyword.strip() and keyword.strip().lower() not in _question_haystack(q).lower():
+                return False
+            if only_selected and not q.selected:
+                return False
+            return True
+
+        # ---------- build display units ----------
+        # A group is rendered once with all its children. If any child matches the
+        # filter, the whole group is shown so the reader never loses its context.
+        units = []
+        seen_groups = set()
+
+        for q in questions:
+            gid = (q.group_id or "").strip()
+            if gid:
+                if gid in seen_groups:
+                    continue
+                seen_groups.add(gid)
+                members = sorted(
+                    [x for x in questions if (x.group_id or "").strip() == gid],
+                    key=lambda x: x.source_no
+                )
+                if any(_question_matches(x) for x in members):
+                    units.append(("group", gid, members))
+            else:
+                if _question_matches(q):
+                    units.append(("single", str(q.source_no), [q]))
+
+        visible_question_nos = {
+            q.source_no
+            for kind, uid, members in units
+            for q in members
+        }
 
         selected_count = sum(1 for q in questions if q.selected)
         mc1, mc2, mc3 = st.columns(3)
         mc1.metric("全部題數", len(questions))
-        mc2.metric("目前顯示", len(visible))
+        mc2.metric("目前顯示題數", len(visible_question_nos))
         mc3.metric("已選入題本", selected_count)
 
         bc1, bc2, bc3 = st.columns(3)
         if bc1.button("清除全部選取", key="overview_clear_all", use_container_width=True):
             for q in questions:
                 q.selected = False
+                st.session_state[f"sel_{q.source_no}"] = False
             st.rerun()
-        if bc2.button("選取目前篩選結果", key="overview_select_visible", use_container_width=True):
-            visible_nos = {q.source_no for q in visible}
+
+        if bc2.button("選取目前顯示結果", key="overview_select_visible", use_container_width=True):
             for q in questions:
-                if q.source_no in visible_nos:
+                if q.source_no in visible_question_nos:
                     q.selected = True
+                    st.session_state[f"sel_{q.source_no}"] = True
             st.rerun()
-        if bc3.button("取消目前篩選結果", key="overview_unselect_visible", use_container_width=True):
-            visible_nos = {q.source_no for q in visible}
+
+        if bc3.button("取消目前顯示結果", key="overview_unselect_visible", use_container_width=True):
             for q in questions:
-                if q.source_no in visible_nos:
+                if q.source_no in visible_question_nos:
                     q.selected = False
+                    st.session_state[f"sel_{q.source_no}"] = False
             st.rerun()
 
         st.divider()
 
-        if not visible:
+        if not units:
             st.warning("目前篩選條件下沒有題目。")
         else:
-            for q in visible:
-                # Normalize display rate.
-                if q.pass_rate is None:
-                    rate_text = "—"
-                else:
-                    rr = float(q.pass_rate)
-                    if rr <= 1:
-                        rr *= 100
-                    rate_text = f"{rr:.1f}%"
+            for kind, uid, members in units:
+                if kind == "group":
+                    first_no = min(x.source_no for x in members)
+                    last_no = max(x.source_no for x in members)
+                    group_title = uid if uid else f"{first_no}-{last_no}"
 
-                card_left, card_right = st.columns([0.78, 0.22], vertical_alignment="top")
-                with card_left:
-                    st.markdown(f"### 第 {q.source_no} 題")
-                    if q.material and q.material.strip():
-                        st.markdown("**閱讀／共用材料**")
-                        st.write(q.material.strip())
-                    st.markdown("**題目**")
-                    st.write(q.text.strip() if q.text else "（題幹未辨識，請至建立題庫頁校對）")
-                    if q.options:
+                    st.markdown(f"## 題組 {group_title}｜原第 {first_no}～{last_no} 題")
+
+                    # Prefer explicit group_intro. Otherwise take the most complete
+                    # shared material available among children.
+                    intro_candidates = [
+                        (x.group_intro or "").strip()
+                        for x in members
+                        if (x.group_intro or "").strip()
+                    ]
+                    material_candidates = [
+                        (x.material or "").strip()
+                        for x in members
+                        if (x.material or "").strip()
+                    ]
+
+                    if intro_candidates:
+                        shared_intro = max(intro_candidates, key=len)
+                    elif material_candidates:
+                        shared_intro = max(material_candidates, key=len)
+                    else:
+                        shared_intro = ""
+
+                    if shared_intro:
+                        st.markdown("### 共用閱讀材料／頂端題幹")
+                        st.write(shared_intro)
+                    else:
+                        st.warning(
+                            "本題組目前沒有辨識到共用閱讀材料。請到「① 建立題庫 → 題目結構校對」"
+                            "把題組頂端文章／共用材料填入任一子題的「閱讀／共用材料」。"
+                        )
+
+                    # Whole-group selection: groups should not be split.
+                    all_selected = all(x.selected for x in members)
+                    some_selected = any(x.selected for x in members)
+                    if some_selected and not all_selected:
+                        st.warning("目前此題組只有部分子題被選取；題組題建議整組保留。")
+
+                    group_select = st.checkbox(
+                        f"整組加入本次題本（{len(members)} 題）",
+                        value=all_selected,
+                        key=f"overview_group_select_{uid}"
+                    )
+                    if group_select != all_selected:
+                        for x in members:
+                            x.selected = group_select
+                            st.session_state[f"sel_{x.source_no}"] = group_select
+                        st.rerun()
+
+                    # Render all subquestions together, each with answer and rate.
+                    for x in members:
+                        rate = _norm_rate(x)
+                        rate_text = "—" if rate is None else f"{rate:.1f}%"
+
+                        st.markdown(f"### 第 {x.source_no} 題　｜答案：**{x.answer or '—'}**　｜通過率：**{rate_text}**")
+
+                        # Avoid repeating the same shared material before every child.
+                        child_material = (x.material or "").strip()
+                        if child_material and child_material != shared_intro:
+                            st.markdown("**本子題附加材料**")
+                            st.write(child_material)
+
+                        st.write(x.text.strip() if x.text else "（題幹未辨識，請至建立題庫頁校對）")
                         for letter in ["A", "B", "C", "D"]:
-                            val = q.options.get(letter, "")
+                            val = (x.options or {}).get(letter, "")
                             if val and val.strip():
                                 st.write(f"({letter}) {val.strip()}")
 
-                with card_right:
-                    st.markdown("**題目資訊**")
-                    st.write(f"答案：**{q.answer or '—'}**")
-                    st.write(f"通過率：**{rate_text}**")
-                    if q.category:
-                        st.write(f"能力：{q.category}")
-                    q.selected = st.checkbox(
-                        "加入本次題本",
-                        value=q.selected,
-                        key=f"overview_select_{q.source_no}"
-                    )
-                    if q.visual_mode or (not q.text.strip()):
-                        st.caption("此題含圖片／複雜版面")
+                    with st.expander("查看此題組原 PDF 裁圖", expanded=False):
+                        for x in members:
+                            if x.crop_png:
+                                st.markdown(f"**原第 {x.source_no} 題**")
+                                st.image(x.crop_png, use_container_width=True)
 
-                with st.expander("查看原題裁圖", expanded=False):
-                    if q.crop_png:
-                        st.image(q.crop_png, use_container_width=True)
-                    else:
-                        st.caption("目前沒有原題裁圖。")
-                st.divider()
+                    st.divider()
+
+                else:
+                    q = members[0]
+                    rate = _norm_rate(q)
+                    rate_text = "—" if rate is None else f"{rate:.1f}%"
+
+                    card_left, card_right = st.columns([0.78, 0.22], vertical_alignment="top")
+                    with card_left:
+                        st.markdown(f"### 第 {q.source_no} 題")
+                        if q.material and q.material.strip():
+                            st.markdown("**閱讀／共用材料**")
+                            st.write(q.material.strip())
+
+                        st.markdown("**題目**")
+                        st.write(q.text.strip() if q.text else "（題幹未辨識，請至建立題庫頁校對）")
+                        for letter in ["A", "B", "C", "D"]:
+                            val = (q.options or {}).get(letter, "")
+                            if val and val.strip():
+                                st.write(f"({letter}) {val.strip()}")
+
+                    with card_right:
+                        st.markdown("**題目資訊**")
+                        st.write(f"答案：**{q.answer or '—'}**")
+                        st.write(f"通過率：**{rate_text}**")
+                        if q.category:
+                            st.write(f"能力：{q.category}")
+                        q.selected = st.checkbox(
+                            "加入本次題本",
+                            value=q.selected,
+                            key=f"overview_select_{q.source_no}"
+                        )
+
+                    with st.expander("查看原題裁圖", expanded=False):
+                        if q.crop_png:
+                            st.image(q.crop_png, use_container_width=True)
+                        else:
+                            st.caption("目前沒有原題裁圖。")
+                    st.divider()
 
         st.info(
-            "建議操作：先利用通過率或關鍵字縮小範圍 → 逐題閱讀題目與答案 → "
-            "勾選適合的題目 → 再到「④ 篩選組題」確認題數與順序。"
+            "建議操作：先在總覽閱讀完整題目／題組 → 用通過率或關鍵字縮小範圍 → "
+            "整組或逐題勾選 → 再到「④ 篩選組題」確認最終題數。"
         )
 
 with tab2:
