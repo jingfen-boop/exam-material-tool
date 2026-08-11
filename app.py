@@ -19,7 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v3.2 考題總覽＋年度資料包＋詳解工作台"
+APP_VERSION = "Web v3.3 年度資料流程優化＋考題總覽＋詳解工作台"
 
 # -----------------------------
 # Models
@@ -1504,54 +1504,33 @@ ref_tab, tab1, overview_tab, tab2, tab3, tab4 = st.tabs(["① 年度資料", "�
 
 
 with ref_tab:
-    st.subheader(f"{int(st.session_state.year)} 年度參考資料")
+    st.subheader(f"{int(st.session_state.year)} 年度資料")
     st.caption(
-        "這一頁是為了讓程式可以跨年度延用。每一年只要換掉當年度三家出版社詳解與內部教師版參考，"
-        "不需要修改 Python 程式。"
+        "年度資料流程已改成：先建立 → 再檢查 → 再下載保存 → 之後可直接載入 → 最後管理整合成果。"
     )
 
     refdb = _load_reference_library()
     ref_year = refdb.get("year")
+
     if ref_year == int(st.session_state.year):
         st.success(f"目前載入的參考庫年度：{ref_year}")
     else:
         st.warning(
             f"目前參考庫年度為 {ref_year or '未設定'}，與現在設定的 {int(st.session_state.year)} 年不同。"
-            "請建立或匯入本年度參考庫後，再進入詳解工作台。"
+            "若要製作本年度教材，請先完成 A 區建立／更新本年度參考庫，或到 D 區載入既有年度參考包。"
         )
 
-    st.markdown("### A. 最快方式：匯入／匯出年度參考包")
-    package_upload = st.file_uploader(
-        "上傳以前建立好的年度參考包 JSON",
-        type=["json"],
-        key="annual_package_upload"
-    )
-    if st.button("載入年度參考包", disabled=not package_upload, key="load_annual_package"):
-        try:
-            db = json.loads(package_upload.getvalue().decode("utf-8"))
-            if "publisher" not in db or "history_raw" not in db:
-                raise ValueError("這不是有效的年度參考包。")
-            db.setdefault("strategy", DEFAULT_STRATEGY_LIBRARY)
-            db.setdefault("drafts", {})
-            st.session_state.reference_db = db
-            st.success(f"已載入 {db.get('year', '未標示年度')} 年度參考包。")
-            st.rerun()
-        except Exception as e:
-            st.error(f"載入失敗：{e}")
-
-    st.download_button(
-        "下載目前年度參考包 JSON",
-        data=_annual_package_json(refdb),
-        file_name=f"{int(st.session_state.year)}_會考詳解年度參考包.json",
-        mime="application/json",
-        use_container_width=True
-    )
-
-    st.divider()
-    st.markdown("### B. 第一次建立本年度參考包")
+    # --------------------------------------------------
+    # A. Build
+    # --------------------------------------------------
+    st.markdown("## A. 建立／更新本年度參考庫")
     st.caption(
-        "三家出版社可上傳 DOCX、PPTX、PDF、TXT，可同一家多檔。"
-        "舊式 .doc 請先在 Word 另存為 .docx；這樣未來在 Streamlit Cloud 最穩定。"
+        "第一次處理某一年度時，先從這裡開始。上傳三家出版社詳解，以及本團隊歷年教師版參考檔。"
+    )
+
+    st.info(
+        "建議格式：DOCX、PPTX、PDF、TXT。舊式 .doc 在 Streamlit Cloud 不穩定，"
+        "請先用 Word 另存成 .docx 再上傳。"
     )
 
     pc1, pc2, pc3 = st.columns(3)
@@ -1606,26 +1585,135 @@ with ref_tab:
             except Exception as e:
                 all_errors.append(f"{uploaded.name}：{e}")
 
-        # Preserve any existing integrated drafts only when they belong to the same year.
         olddb = _load_reference_library()
         if olddb.get("year") == int(st.session_state.year):
             newdb["drafts"] = olddb.get("drafts", {})
 
         st.session_state.reference_db = newdb
+
         st.success(
-            "年度參考庫已建立。出版社題數："
+            "年度參考庫已建立。出版社辨識："
             + "／".join(f"{p}{len(newdb['publisher'][p])}題" for p in ("翰林","康軒","南一"))
             + f"；內部參考 {len(newdb['history_raw'])} 份。"
         )
+
         if all_errors:
             st.warning("以下檔案需處理：\n- " + "\n- ".join(all_errors))
+
         st.rerun()
 
     st.divider()
-    st.markdown("### C. 整合建議稿的年度保存")
+
+    # --------------------------------------------------
+    # B. Check
+    # --------------------------------------------------
+    st.markdown("## B. 檢查本年度參考庫")
     st.caption(
-        "因本版不使用 AI/API，高品質的『三家綜合建議詳解＋教學步驟』建議由人工／ChatGPT完成後匯入。"
-        "這樣隔年只需更換資料包，不會把115年的內容硬套到其他年度。"
+        "建立後先在這裡確認資料是否完整，再下載年度 JSON。"
+    )
+
+    active = _load_reference_library()
+    expected_count = len(st.session_state.questions) if st.session_state.questions else None
+
+    summary_rows = []
+    for p in ("翰林", "康軒", "南一"):
+        qdict = active.get("publisher", {}).get(p, {})
+        nums = sorted(int(x) for x in qdict.keys() if str(x).isdigit())
+        if expected_count:
+            missing = [str(i) for i in range(1, expected_count + 1) if i not in nums]
+            missing_text = "、".join(missing) if missing else "無"
+        else:
+            missing_text = "需先建立題庫才能比對缺題"
+        summary_rows.append({
+            "來源": p,
+            "已辨識題數": len(qdict),
+            "缺題": missing_text
+        })
+
+    summary_rows.append({
+        "來源": "內部教師版參考檔",
+        "已辨識題數": len(active.get("history_raw", {})),
+        "缺題": "—"
+    })
+
+    st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+
+    if expected_count:
+        all_ok = True
+        for p in ("翰林", "康軒", "南一"):
+            nums = {
+                int(x) for x in active.get("publisher", {}).get(p, {}).keys()
+                if str(x).isdigit()
+            }
+            if any(i not in nums for i in range(1, expected_count + 1)):
+                all_ok = False
+                break
+
+        if all_ok:
+            st.success(f"三家出版社皆已辨識完整 1～{expected_count} 題。")
+        else:
+            st.warning(
+                "至少一家出版社仍有缺題。建議先回 A 區補資料或改用較容易解析的 DOCX／PPTX，再進入 C 區保存。"
+            )
+    else:
+        st.info("若要檢查出版社是否缺題，請先到「② 建立題庫」建立本年度題庫。")
+
+    st.divider()
+
+    # --------------------------------------------------
+    # C. Save
+    # --------------------------------------------------
+    st.markdown("## C. 儲存本年度參考包")
+    st.caption(
+        "確認 B 區資料正確後，再下載 JSON 保存。下次不必重新上傳全部出版社與內部檔案。"
+    )
+
+    st.download_button(
+        f"下載 {int(st.session_state.year)} 年度參考包 JSON",
+        data=_annual_package_json(active),
+        file_name=f"{int(st.session_state.year)}_會考詳解年度參考包.json",
+        mime="application/json",
+        use_container_width=True
+    )
+
+    st.divider()
+
+    # --------------------------------------------------
+    # D. Reload
+    # --------------------------------------------------
+    st.markdown("## D. 下次繼續工作／載入既有年度參考包")
+    st.caption(
+        "如果這個年度之前已經建立過，不需要再從 A 區上傳全部原始檔；直接載入之前下載的年度 JSON 即可。"
+    )
+
+    package_upload = st.file_uploader(
+        "上傳以前建立好的年度參考包 JSON",
+        type=["json"],
+        key="annual_package_upload"
+    )
+
+    if st.button("載入年度參考包", disabled=not package_upload, key="load_annual_package"):
+        try:
+            db = json.loads(package_upload.getvalue().decode("utf-8"))
+            if "publisher" not in db or "history_raw" not in db:
+                raise ValueError("這不是有效的年度參考包。")
+            db.setdefault("strategy", DEFAULT_STRATEGY_LIBRARY)
+            db.setdefault("drafts", {})
+            st.session_state.reference_db = db
+            st.success(f"已載入 {db.get('year', '未標示年度')} 年度參考包。")
+            st.rerun()
+        except Exception as e:
+            st.error(f"載入失敗：{e}")
+
+    st.divider()
+
+    # --------------------------------------------------
+    # E. Integrated drafts
+    # --------------------------------------------------
+    st.markdown("## E. 本年度整合建議稿")
+    st.caption(
+        "這裡保存的是『你真正編輯過的成果』，和 C 區的『來源參考庫』不同。"
+        "包含每題能力類型、三家比較筆記、建議詳解、教學重點、教學步驟與筆記策略。"
     )
 
     draft_upload = st.file_uploader(
@@ -1633,11 +1721,19 @@ with ref_tab:
         type=["json"],
         key="annual_draft_upload"
     )
-    if st.button("匯入整合建議稿", disabled=not (draft_upload and st.session_state.questions), key="import_drafts"):
+
+    if st.button(
+        "匯入整合建議稿",
+        disabled=not (draft_upload and st.session_state.questions),
+        key="import_drafts"
+    ):
         try:
             payload = json.loads(draft_upload.getvalue().decode("utf-8"))
             if payload.get("year") not in (None, int(st.session_state.year)):
-                st.warning(f"此整合稿標示年度為 {payload.get('year')}，請確認是否要用在目前年度。")
+                st.warning(
+                    f"此整合稿標示年度為 {payload.get('year')}，"
+                    f"目前設定年度為 {int(st.session_state.year)}，請確認是否正確。"
+                )
             applied = _apply_drafts_to_questions(payload, st.session_state.questions)
             st.success(f"已套用 {applied} 題整合建議稿。")
         except Exception as e:
@@ -1648,22 +1744,22 @@ with ref_tab:
             "下載目前已編輯的整合建議稿 JSON",
             data=json.dumps(
                 _drafts_from_questions(st.session_state.questions, st.session_state.year),
-                ensure_ascii=False, indent=2
+                ensure_ascii=False,
+                indent=2
             ).encode("utf-8"),
             file_name=f"{int(st.session_state.year)}_教師版整合建議稿.json",
             mime="application/json",
             use_container_width=True
         )
+    else:
+        st.info("建立題庫後，才能匯出每題的整合建議稿。")
 
     st.divider()
-    st.markdown("### 目前參考庫摘要")
-    active = _load_reference_library()
-    summary_rows = [
-        {"來源": p, "已辨識題數": len(active.get("publisher", {}).get(p, {}))}
-        for p in ("翰林", "康軒", "南一")
-    ]
-    summary_rows.append({"來源": "內部教師版參考檔", "已辨識題數": len(active.get("history_raw", {}))})
-    st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+    st.markdown("### 年度資料正確流程")
+    st.write(
+        "A 建立／更新參考庫 → B 檢查辨識結果與缺題 → C 下載年度參考包保存 → "
+        "下次直接從 D 載入 → 詳解工作完成後從 E 保存整合成果。"
+    )
 
 with tab1:
     st.subheader("上傳三份來源")
