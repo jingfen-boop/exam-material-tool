@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.0 題庫內容比對出版社詳解＋題組完整總覽"
+APP_VERSION = "Web v4.1 修正 Word 非法字元錯誤＋題庫內容比對"
 
 # -----------------------------
 # Models
@@ -523,7 +523,7 @@ def add_meta_runs(p, year, source_no, pass_rate, category):
     shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), "00E5FF"); rPr.append(shd)
 
     if category:
-        r = p.add_run(category)
+        r = p.add_run(_clean_word_text(category))
         set_eastasia(r)
         r.font.size = Pt(10)
         rPr = r._element.get_or_add_rPr()
@@ -562,7 +562,7 @@ def add_header(doc, title):
 
 def add_question(doc, q: Question, display_no: int, year: int, teacher=False, use_crop=False):
     p = doc.add_paragraph()
-    r = p.add_run(f"（{' ' + q.answer + ' ' if teacher and q.answer else '   '}）{display_no}. ")
+    r = p.add_run(f"（{' ' + _clean_word_text(q.answer) + ' ' if teacher and q.answer else '   '}）{display_no}. ")
     set_eastasia(r)
     if teacher and q.answer:
         r.font.color.rgb = RGBColor(255,0,0)
@@ -573,14 +573,14 @@ def add_question(doc, q: Question, display_no: int, year: int, teacher=False, us
     else:
         if q.material.strip():
             pmaterial = doc.add_paragraph()
-            rm = pmaterial.add_run(q.material)
+            rm = pmaterial.add_run(_clean_word_text(q.material))
             set_eastasia(rm)
-        r = p.add_run(q.text)
+        r = p.add_run(_clean_word_text(q.text))
         set_eastasia(r)
         for key in ["A","B","C","D"]:
             if key in q.options:
                 po = doc.add_paragraph()
-                ro = po.add_run(f"({key}){q.options[key]}")
+                ro = po.add_run(f"({key}){_clean_word_text(q.options[key])}")
                 set_eastasia(ro)
 
     pm = doc.add_paragraph()
@@ -593,27 +593,27 @@ def add_question(doc, q: Question, display_no: int, year: int, teacher=False, us
         p = cell.paragraphs[0]
         r = p.add_run("解析：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(q.explanation or "（待補）")
+        r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.teaching_focus.strip():
             p = cell.add_paragraph()
             r = p.add_run("【教學重點】：\n")
             set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(q.teaching_focus)
+            r2 = p.add_run(_clean_word_text(q.teaching_focus))
             set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = cell.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(q.teaching or "（待補）")
+        r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.note_strategy.strip():
             p = cell.add_paragraph()
             r = p.add_run("【筆記策略】：\n")
             set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(q.note_strategy)
+            r2 = p.add_run(_clean_word_text(q.note_strategy))
             set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
     doc.add_paragraph()
@@ -684,7 +684,7 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
     if teacher:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(2)
-        r = p.add_run(f"答案：{q.answer or '—'}")
+        r = p.add_run(f"答案：{_clean_word_text(q.answer or '—')}")
         set_eastasia(r)
         r.bold = True
         r.font.color.rgb = RGBColor(255,0,0)
@@ -695,27 +695,27 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
         p = cell.paragraphs[0]
         r = p.add_run("解析：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(q.explanation or "（待補）")
+        r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.teaching_focus.strip():
             p = cell.add_paragraph()
             r = p.add_run("【教學重點】：\n")
             set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(q.teaching_focus)
+            r2 = p.add_run(_clean_word_text(q.teaching_focus))
             set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = cell.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(q.teaching or "（待補）")
+        r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.note_strategy.strip():
             p = cell.add_paragraph()
             r = p.add_run("【筆記策略】：\n")
             set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(q.note_strategy)
+            r2 = p.add_run(_clean_word_text(q.note_strategy))
             set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
     spacer = doc.add_paragraph()
@@ -730,7 +730,7 @@ def _add_editable_options(doc, q: Question, two_columns=False):
         for idx, key in enumerate(keys):
             cell = table.cell(idx // 2, idx % 2)
             p = cell.paragraphs[0]
-            r = p.add_run(f"({key}) {q.options.get(key, '')}")
+            r = p.add_run(f"({key}) {_clean_word_text(q.options.get(key, ''))}")
             set_eastasia(r)
             r.font.size = Pt(10.5)
         # Remove table borders for exam-like appearance.
@@ -746,7 +746,7 @@ def _add_editable_options(doc, q: Question, two_columns=False):
             p = doc.add_paragraph()
             p.paragraph_format.left_indent = Cm(0.7)
             p.paragraph_format.space_after = Pt(1)
-            r = p.add_run(f"({key}) {q.options.get(key, '')}")
+            r = p.add_run(f"({key}) {_clean_word_text(q.options.get(key, ''))}")
             set_eastasia(r)
             r.font.size = Pt(10.5)
 
@@ -818,28 +818,66 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
         p = doc.add_paragraph()
         r = p.add_run("解析：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(q.explanation or "（待補）")
+        r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.teaching_focus.strip():
             p = doc.add_paragraph()
             r = p.add_run("【教學重點】：\n")
             set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(q.teaching_focus)
+            r2 = p.add_run(_clean_word_text(q.teaching_focus))
             set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = doc.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(q.teaching or "（待補）")
+        r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
 
 
 def _clean_word_text(value) -> str:
+    """Return text safe for python-docx / XML 1.0.
+
+    PDF/PPT/DOCX extraction may contain invisible control characters such as
+    form-feed, vertical-tab, NUL, surrogate code points or Unicode noncharacters.
+    Streamlit can display them, but lxml cannot write them into a .docx XML node.
+    """
     if value is None:
         return ""
+
     s = str(value).replace("\u00a0", " ").replace("\u3000", " ")
+
+    cleaned = []
+    for ch in s:
+        cp = ord(ch)
+
+        # XML 1.0 valid characters:
+        # TAB, LF, CR, U+0020–D7FF, U+E000–FFFD, U+10000–10FFFF.
+        valid = (
+            cp in (0x09, 0x0A, 0x0D)
+            or 0x20 <= cp <= 0xD7FF
+            or 0xE000 <= cp <= 0xFFFD
+            or 0x10000 <= cp <= 0x10FFFF
+        )
+
+        # Explicitly exclude Unicode noncharacters that can still cause trouble
+        # in XML consumers.
+        noncharacter = (
+            0xFDD0 <= cp <= 0xFDEF
+            or (cp & 0xFFFF) in (0xFFFE, 0xFFFF)
+        )
+
+        if valid and not noncharacter:
+            cleaned.append(ch)
+        elif ch in ("\x0b", "\x0c"):
+            # Preserve intended visual separation rather than silently gluing text.
+            cleaned.append("\n")
+        else:
+            # Drop illegal/invisible controls.
+            pass
+
+    s = "".join(cleaned)
     s = re.sub(r"[ \t]+", " ", s)
     s = re.sub(r"\n[ \t]*\n+", "\n", s)
     return s.strip()
@@ -959,7 +997,7 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(2)
         p.paragraph_format.space_after = Pt(4)
-        r = p.add_run(q.material)
+        r = p.add_run(material_text)
         set_eastasia(r)
         r.font.size = Pt(10.5)
 
@@ -972,7 +1010,7 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
 
         c0, c1 = table.cell(0,0), table.cell(0,1)
         p = c0.paragraphs[0]
-        r = p.add_run(f"（{' ' + q.answer + ' ' if teacher and q.answer else '   '}）{display_no}. {q.text}")
+        r = p.add_run(f"（{' ' + _clean_word_text(q.answer) + ' ' if teacher and q.answer else '   '}）{display_no}. {stem_text}")
         set_eastasia(r)
         r.font.size = Pt(10.5)
         _add_first_image_to_cell(c1, q, width_cm=5.9)
@@ -988,7 +1026,7 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(2)
         p.paragraph_format.space_after = Pt(1)
-        r = p.add_run(f"（{' ' + q.answer + ' ' if teacher and q.answer else '   '}）{display_no}. {q.text}")
+        r = p.add_run(f"（{' ' + _clean_word_text(q.answer) + ' ' if teacher and q.answer else '   '}）{display_no}. {stem_text}")
         set_eastasia(r)
         r.font.size = Pt(10.5)
 
@@ -1016,27 +1054,27 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
         p = doc.add_paragraph()
         r = p.add_run("解析：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(q.explanation or "（待補）")
+        r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.teaching_focus.strip():
             p = doc.add_paragraph()
             r = p.add_run("【教學重點】：\n")
             set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(q.teaching_focus)
+            r2 = p.add_run(_clean_word_text(q.teaching_focus))
             set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = doc.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(q.teaching or "（待補）")
+        r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.note_strategy.strip():
             p = doc.add_paragraph()
             r = p.add_run("【筆記策略】：\n")
             set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(q.note_strategy)
+            r2 = p.add_run(_clean_word_text(q.note_strategy))
             set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
     # Keep only normal paragraph spacing; do not insert an empty spacer paragraph.
