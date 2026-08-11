@@ -19,7 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v3.3 年度資料流程優化＋考題總覽＋詳解工作台"
+APP_VERSION = "Web v3.4 出版社多檔互補＋缺題容錯＋詳解工作台"
 
 # -----------------------------
 # Models
@@ -1385,24 +1385,101 @@ def _split_text_by_question(text: str, expected_count=None):
         out[str(q)] = text[pos:end].strip()
     return out
 
+def _recover_missing_question_blocks(text: str, missing_numbers, expected_count=None):
+    """Second-pass recovery for publisher files whose question headings use irregular layouts.
+
+    This is deliberately conservative: a recovered number must appear near a line/slide
+    boundary in a question-like form. The next recognised question number becomes the end
+    boundary. This helps DOCX/PPTX files where a few headings do not follow the dominant
+    numbering style without hard-coding a particular year's missing questions.
+    """
+    text = _normalize_reference_text(text)
+    if not text or not missing_numbers:
+        return {}
+
+    max_q = expected_count or max(missing_numbers)
+    # Accept common publisher heading forms: 24. / 24、 / 24） / (24) / 第24題 / 題24.
+    anchor = re.compile(
+        r"(?mi)(?:^|\n)\s*(?:"
+        r"第\s*(\d{1,2})\s*題"
+        r"|題\s*(\d{1,2})\s*[.．、:：]?"
+        r"|[（(]?\s*(\d{1,2})\s*[）)]\s*[.．、:：]?"
+        r"|(\d{1,2})\s*[.．、:：]"
+        r")"
+    )
+    anchors = []
+    for m in anchor.finditer(text):
+        vals = [g for g in m.groups() if g]
+        if not vals:
+            continue
+        q = int(vals[0])
+        if 1 <= q <= max_q:
+            anchors.append((q, m.start()))
+
+    recovered = {}
+    for q in sorted(set(int(x) for x in missing_numbers)):
+        candidates = [(qq, pos) for qq, pos in anchors if qq == q]
+        if not candidates:
+            continue
+        # Prefer the occurrence whose following anchor is a plausible later question.
+        for _, pos in candidates:
+            later = [(qq, p) for qq, p in anchors if p > pos and qq != q]
+            end = min((p for qq, p in later if qq > q), default=len(text))
+            block = text[pos:end].strip()
+            # Reject tiny false positives such as answer keys or isolated page numbers.
+            if len(block) >= 40:
+                recovered[str(q)] = block
+                break
+    return recovered
+
+
 def _parse_publisher_files(files, expected_count=None):
+    """Parse and merge all files from one publisher.
+
+    v3.4 uses two passes. First it applies the normal DOCX/PPTX splitter. Then, when an
+    expected question count is known, it revisits every uploaded file only for missing
+    question numbers. Results from Word and PowerPoint are merged rather than replacing
+    one another, so the two formats can complement each other.
+    """
     combined = {}
     errors = []
+    raw_sources = []
+
     for uploaded in files or []:
         try:
             raw = _uploaded_file_text(uploaded)
+            raw_sources.append((uploaded.name, raw))
             if "[投影片" in raw:
                 parsed = _split_slides_by_question(raw, expected_count)
             else:
                 parsed = _split_text_by_question(raw, expected_count)
+
             for q, block in parsed.items():
-                if block.strip():
-                    if q in combined:
-                        combined[q] += "\n\n" + block.strip()
-                    else:
-                        combined[q] = block.strip()
+                block = (block or "").strip()
+                if not block:
+                    continue
+                if q in combined:
+                    # Avoid exact duplicate blocks while preserving complementary detail.
+                    if block not in combined[q]:
+                        combined[q] += "\n\n" + block
+                else:
+                    combined[q] = block
         except Exception as e:
             errors.append(f"{uploaded.name}：{e}")
+
+    # Second pass: recover only genuinely missing questions from every source.
+    if expected_count:
+        missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
+        if missing:
+            for source_name, raw in raw_sources:
+                recovered = _recover_missing_question_blocks(raw, missing, expected_count)
+                for q, block in recovered.items():
+                    if q not in combined and block.strip():
+                        combined[q] = block.strip()
+                missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
+                if not missing:
+                    break
+
     return combined, errors
 
 def _publisher_analysis_only(block: str) -> str:
