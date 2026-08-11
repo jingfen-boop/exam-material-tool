@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.6 考題校對＋Word 即時排版預覽"
+APP_VERSION = "Web v4.7 Word 預覽渲染修正版"
 
 # -----------------------------
 # Models
@@ -2018,89 +2018,122 @@ def _json_safe(value):
 
 def _render_word_question_preview(q, material, stem, oa, ob, oc, od,
                                   render_mode="自動", layout_style="一般直列"):
-    """Lightweight WYSIWYG-style preview using the same question fields as Word output.
+    """Render a clean student-Word-like preview without leaking HTML source.
 
-    This is intentionally a page-layout preview, not a DOCX-to-image conversion:
-    it updates immediately while editing and mirrors the student question structure.
+    v4.7 uses Streamlit's native HTML renderer when available, with a safe
+    components.html fallback. The preview intentionally shows only document
+    content, not internal render-mode metadata.
     """
     import html as _html
 
     def esc(v):
         return _html.escape(str(v or "")).replace("\n", "<br>")
 
-    # Word output uses a new sequential question number; in overview we keep source no
-    # as a clear preview placeholder until the user forms the booklet.
     preview_no = q.source_no
     answer_blank = "（　）"
     mat = esc(material)
     stxt = esc(stem)
     opts = {"A": esc(oa), "B": esc(ob), "C": esc(oc), "D": esc(od)}
 
-    image_html = ""
-    if render_mode == "整題圖像" and q.crop_png:
-        image_html = """
-        <div class="word-img-note">［整題圖像模式：實際 Word 將使用原 PDF 題目裁圖；
-        題號與答案括弧仍為可編輯文字］</div>
+    if render_mode == "整題圖像":
+        body = f"""
+        <div class="qline"><span class="blank">{answer_blank}</span>
+        <span class="qno">{preview_no}.</span></div>
+        <div class="image-placeholder">
+          本題為「整題圖像」模式。正式 Word 會在可編輯的答案括弧與題號後，
+          插入原 PDF 題目裁圖。
+        </div>
         """
     else:
-        opt_html = ""
-        if any(opts.values()):
-            if layout_style == "選項兩欄":
-                opt_html = '<div class="opt-grid">' + "".join(
-                    f'<div>({k}) {v}</div>' for k, v in opts.items() if v
-                ) + "</div>"
-            else:
-                opt_html = "".join(
-                    f'<div class="opt">({k}) {v}</div>' for k, v in opts.items() if v
-                )
-        image_html = f"""
-          {f'<div class="material">{mat}</div>' if mat else ''}
-          <div class="question-line"><span>{answer_blank}</span>
-          <span class="qno">{preview_no}.</span> <span>{stxt}</span></div>
-          <div class="options">{opt_html}</div>
+        material_html = f'<div class="material">{mat}</div>' if mat else ""
+        visible_opts = [(k, v) for k, v in opts.items() if v]
+        if layout_style == "選項兩欄":
+            options_html = '<div class="options two-col">' + "".join(
+                f'<div class="opt"><span class="olab">({k})</span> {v}</div>'
+                for k, v in visible_opts
+            ) + "</div>"
+        else:
+            options_html = '<div class="options">' + "".join(
+                f'<div class="opt"><span class="olab">({k})</span> {v}</div>'
+                for k, v in visible_opts
+            ) + "</div>"
+
+        body = f"""
+        {material_html}
+        <div class="qline">
+          <span class="blank">{answer_blank}</span>
+          <span class="qno">{preview_no}.</span>
+          <span class="stem">{stxt}</span>
+        </div>
+        {options_html}
         """
 
-    preview = f"""
-    <style>
-      .word-preview-wrap {{
-        background:#eceff3; padding:18px; border-radius:10px;
-      }}
-      .word-page {{
-        background:white; max-width:760px; min-height:430px; margin:auto;
-        padding:48px 54px; box-shadow:0 1px 7px rgba(0,0,0,.14);
-        color:#111; font-family:"Noto Serif TC","PMingLiU","MingLiU",serif;
-        font-size:16px; line-height:1.65;
-      }}
-      .word-preview-title {{
-        font-family:"Noto Sans TC",sans-serif; font-size:13px; color:#6b7280;
-        border-bottom:1px solid #ddd; padding-bottom:8px; margin-bottom:18px;
-      }}
-      .material {{ margin-bottom:14px; white-space:normal; }}
-      .question-line {{ display:flex; gap:6px; align-items:flex-start; }}
-      .qno {{ white-space:nowrap; }}
-      .options {{ margin-left:42px; margin-top:6px; }}
-      .opt {{ margin:2px 0; }}
-      .opt-grid {{
-        display:grid; grid-template-columns:1fr 1fr; column-gap:28px; row-gap:4px;
-      }}
-      .word-img-note {{
-        border:1px dashed #999; padding:22px; text-align:center; color:#555;
-        margin-top:18px;
-      }}
-      .preview-meta {{
-        margin-top:20px; font-family:"Noto Sans TC",sans-serif;
-        font-size:12px; color:#777;
-      }}
-    </style>
-    <div class="word-preview-wrap">
-      <div class="word-page">
-        <div class="word-preview-title">學生題本 Word 預覽｜第 {preview_no} 題</div>
-        {image_html}
-        <div class="preview-meta">輸出模式：{esc(render_mode)}　｜　版型：{esc(layout_style)}</div>
+    html_doc = f"""
+    <div class="preview-shell">
+      <div class="paper">
+        {body}
       </div>
     </div>
+    <style>
+      .preview-shell {{
+        background:#eef1f5;
+        padding:18px;
+        border-radius:10px;
+      }}
+      .paper {{
+        box-sizing:border-box;
+        background:#fff;
+        max-width:760px;
+        min-height:330px;
+        margin:0 auto;
+        padding:42px 52px;
+        box-shadow:0 1px 7px rgba(0,0,0,.13);
+        color:#111;
+        font-family:"PMingLiU","MingLiU","Noto Serif TC",serif;
+        font-size:16px;
+        line-height:1.65;
+      }}
+      .material {{
+        white-space:normal;
+        margin-bottom:12px;
+      }}
+      .qline {{
+        display:flex;
+        align-items:flex-start;
+        gap:5px;
+      }}
+      .blank, .qno {{ white-space:nowrap; }}
+      .stem {{ flex:1; }}
+      .options {{
+        margin-left:52px;
+        margin-top:5px;
+      }}
+      .options.two-col {{
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        column-gap:28px;
+      }}
+      .opt {{ margin:1px 0; }}
+      .olab {{ white-space:nowrap; }}
+      .image-placeholder {{
+        margin:12px 0 0 52px;
+        border:1px dashed #aaa;
+        padding:20px;
+        text-align:center;
+        color:#666;
+        font-family:"Noto Sans TC",sans-serif;
+        font-size:14px;
+      }}
+    </style>
     """
-    st.markdown(preview, unsafe_allow_html=True)
+
+    # Streamlit versions differ. st.html renders HTML directly and avoids the
+    # Markdown parser treating nested HTML as a literal code block.
+    if hasattr(st, "html"):
+        st.html(html_doc)
+    else:
+        import streamlit.components.v1 as components
+        components.html(html_doc, height=430, scrolling=False)
 
 def _render_question_review_editor(q, key_prefix="overview"):
     """True editable structure-review editor.
@@ -2234,7 +2267,7 @@ def _render_question_review_editor(q, key_prefix="overview"):
                 key=_wk("preview_kind"),
                 label_visibility="collapsed"
             )
-            st.caption("此處使用與 Word 輸出相同的題目欄位即時預覽；正式頁面分頁仍以下載後的 DOCX 為準。")
+            st.caption("即時模擬學生題本版面；正式字型、圖片尺寸與分頁仍以下載後的 DOCX 為準。")
             _render_word_question_preview(
                 q,
                 material_edit,
