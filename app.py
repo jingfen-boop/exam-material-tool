@@ -19,7 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v3.8 修正年度參考庫解析錯誤＋題組完整總覽"
+APP_VERSION = "Web v3.9 題庫優先＋題組共用材料完整總覽"
 
 # -----------------------------
 # Models
@@ -41,6 +41,7 @@ class Question:
     workbench_reviewed: bool = False
     group_id: str = ""
     group_intro: str = ""
+    group_crop_pngs: list = None
     material: str = ""
     crop_png: bytes = b""
     visual_mode: bool = False
@@ -57,6 +58,8 @@ class Question:
             self.options = {}
         if self.image_pngs is None:
             self.image_pngs = []
+        if self.group_crop_pngs is None:
+            self.group_crop_pngs = []
 
 # -----------------------------
 # PDF parsing
@@ -231,6 +234,102 @@ def _region_text_and_options(page, y0, y1, qno):
 
     return "\n".join(stem_lines).strip(), options
 
+
+def _clean_group_intro_text(text: str) -> str:
+    """Clean page furniture while preserving the actual common passage."""
+    lines = []
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if re.fullmatch(r"\d+", s):
+            continue
+        if any(x in s for x in (
+            "請翻頁繼續作答", "尚有試題", "第頁，共頁",
+            "國中教育會考", "國文科"
+        )):
+            continue
+        lines.append(s)
+    return "\n".join(lines).strip()
+
+
+def _group_headings_with_positions(doc, expected_count=42):
+    """Find '請閱讀…並回答X～Y題' headings with page/y coordinates."""
+    found = []
+    pat = re.compile(r"回答\s*(\d{1,2})\s*[～~\-－至]\s*(\d{1,2})\s*題")
+    for pi, page in enumerate(doc, start=1):
+        for y, x, txt, bbox in _all_page_lines(page):
+            m = pat.search(txt)
+            if not m:
+                continue
+            a, b = int(m.group(1)), int(m.group(2))
+            if 1 <= a <= b <= expected_count:
+                found.append({
+                    "a": a, "b": b, "page": pi,
+                    "y0": bbox[1], "y1": bbox[3], "heading": txt
+                })
+    return found
+
+
+def _extract_group_shared_material(doc, heading, starts_by_q):
+    """Extract the full common material from the group heading to the first subquestion.
+
+    Returns:
+      text: editable extracted text
+      crops: original PDF image slices so tables/images/poems can also be reviewed
+    """
+    a = heading["a"]
+    first = starts_by_q.get(a)
+    if not first:
+        return "", []
+
+    start_page = heading["page"]
+    end_page = first["page"]
+    text_parts = []
+    crops = []
+
+    for pi in range(start_page, end_page + 1):
+        page = doc[pi - 1]
+
+        if pi == start_page:
+            y0 = max(0, heading["y0"] - 4)
+        else:
+            y0 = 42
+
+        if pi == end_page:
+            y1 = max(y0 + 20, first["bbox"][1] - 6)
+        else:
+            y1 = page.rect.height - 38
+
+        if y1 <= y0 + 10:
+            continue
+
+        # Text in visual reading order.
+        segment_lines = []
+        for y, x, txt, bbox in _all_page_lines(page):
+            cy = (bbox[1] + bbox[3]) / 2
+            if y0 <= cy <= y1:
+                segment_lines.append(txt)
+        segment = _clean_group_intro_text("\n".join(segment_lines))
+        if segment:
+            text_parts.append(segment)
+
+        # Original visual crop: preserves tables, diagrams, unusual typography.
+        try:
+            rect = fitz.Rect(0, y0, page.rect.width, y1)
+            pix = page.get_pixmap(
+                matrix=fitz.Matrix(1.35, 1.35),
+                clip=rect,
+                alpha=False
+            )
+            crops.append(pix.tobytes("png"))
+        except Exception:
+            pass
+
+    merged = "\n".join(text_parts).strip()
+    return merged, crops
+
+
 def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[List[Question], Dict[int, bytes]]:
     """Web v1.3 question parser."""
     doc = fitz.open(stream=question_pdf, filetype="pdf")
@@ -239,14 +338,23 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
         pix = page.get_pixmap(matrix=fitz.Matrix(1.25,1.25), alpha=False)
         page_images[pi] = pix.tobytes("png")
 
-    full_text = "\n".join(page.get_text("text") for page in doc)
-    groups = []
-    for m in re.finditer(r"回答\s*(\d{1,2})\s*[～~\-至]\s*(\d{1,2})\s*題", full_text):
-        a, b = int(m.group(1)), int(m.group(2))
-        if a <= b:
-            groups.append((a,b))
-
     starts = _sequential_question_starts(doc, expected_count)
+    starts_by_q = {s["qno"]: s for s in starts}
+
+    # Detect each actual reading group and extract its common material BEFORE
+    # splitting individual child questions.
+    group_headings = _group_headings_with_positions(doc, expected_count)
+    groups = []
+    group_material = {}
+    for h in group_headings:
+        a, b = h["a"], h["b"]
+        groups.append((a, b))
+        intro, intro_crops = _extract_group_shared_material(doc, h, starts_by_q)
+        group_material[(a, b)] = {
+            "intro": intro,
+            "crops": intro_crops
+        }
+
     questions = []
 
     for idx, s in enumerate(starts):
@@ -319,6 +427,13 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
         for a,b in groups:
             if a <= qno <= b:
                 q.group_id = f"{a}-{b}"
+                gm = group_material.get((a, b), {})
+                q.group_intro = gm.get("intro", "")
+                q.group_crop_pngs = list(gm.get("crops", []))
+                # material is also populated so existing editing/output paths
+                # can use the shared passage without requiring re-entry.
+                if q.group_intro:
+                    q.material = q.group_intro
                 break
         questions.append(q)
 
@@ -2191,10 +2306,22 @@ with overview_tab:
                     else:
                         shared_intro = ""
 
+                    shared_crops = []
+                    for x in members:
+                        if getattr(x, "group_crop_pngs", None):
+                            shared_crops = x.group_crop_pngs
+                            break
+
+                    st.markdown("### 共用閱讀材料／頂端題幹")
+                    if shared_crops:
+                        st.caption("以下先呈現原題本共用材料，確保圖表、版面與特殊符號完整。")
+                        for img in shared_crops:
+                            st.image(img, use_container_width=True)
+
                     if shared_intro:
-                        st.markdown("### 共用閱讀材料／頂端題幹")
-                        st.write(shared_intro)
-                    else:
+                        with st.expander("查看／複製共用材料文字", expanded=False):
+                            st.write(shared_intro)
+                    elif not shared_crops:
                         st.warning(
                             "本題組目前沒有辨識到共用閱讀材料。請到「① 建立題庫 → 題目結構校對」"
                             "把題組頂端文章／共用材料填入任一子題的「閱讀／共用材料」。"
