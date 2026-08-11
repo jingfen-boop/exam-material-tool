@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.0 人工確認即時保存＋校對狀態修正"
+APP_VERSION = "Web v5.1 年度專案 ZIP 永久保存＋版本升級免重設"
 
 # -----------------------------
 # Models
@@ -2362,6 +2362,208 @@ def _reset_fresh_bank_selection(questions):
             if key in st.session_state:
                 st.session_state[key] = False
 
+
+# -----------------------------
+# v5.1 Annual project persistence
+# -----------------------------
+_PROJECT_WIDGET_KEYS = [
+    # Core / booklet settings that users commonly have to re-enter.
+    "booklet_no", "suffix", "word_mode", "preset",
+    "keep_groups", "quick_question_spec",
+    "overview_rate_filter", "overview_answer_filter",
+    "overview_keyword", "overview_review_filter", "overview_only_selected",
+]
+
+def _question_to_project_dict(q: Question, image_folder="images"):
+    """Serialize one Question, storing binary images as separate ZIP files."""
+    d = asdict(q)
+    # Binary fields are written separately into the ZIP.
+    d["crop_png"] = None
+    d["body_crop_png"] = None
+    d["image_pngs"] = []
+    d["group_crop_pngs"] = []
+    return d
+
+def _collect_project_settings():
+    out = {}
+    for k in _PROJECT_WIDGET_KEYS:
+        if k in st.session_state:
+            v = st.session_state[k]
+            if isinstance(v, (str, int, float, bool)) or v is None:
+                out[k] = v
+    return out
+
+def _build_annual_project_zip():
+    """Create a single portable project ZIP containing all reusable state.
+
+    Includes:
+    - question bank + manual edits + selections + review status
+    - question crops/images needed by Word output and review
+    - parsed annual publisher/internal reference database
+    - year and common project settings
+    - source PDFs and annual source files when they were uploaded in v5.1+
+    """
+    buf = io.BytesIO()
+    questions = st.session_state.get("questions", [])
+    refdb = st.session_state.get("reference_db", _empty_reference_db(st.session_state.get("year", 115)))
+    sources = st.session_state.get("project_sources", {})
+
+    manifest = {
+        "project_format": "exam-material-tool-project-v1",
+        "app_version": APP_VERSION,
+        "year": int(st.session_state.get("year", 115)),
+        "settings": _collect_project_settings(),
+        "questions": [_question_to_project_dict(q) for q in questions],
+        "reference_db": _json_safe(refdb),
+        "source_index": {},
+    }
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        # Question binary artifacts.
+        for q in questions:
+            qbase = f"question_images/q{q.source_no:03d}"
+            if q.crop_png:
+                z.writestr(f"{qbase}_crop.png", q.crop_png)
+            if q.body_crop_png:
+                z.writestr(f"{qbase}_body.png", q.body_crop_png)
+            for i, img in enumerate(q.image_pngs or []):
+                if img:
+                    z.writestr(f"{qbase}_img_{i:02d}.png", img)
+            for i, img in enumerate(q.group_crop_pngs or []):
+                if img:
+                    z.writestr(f"{qbase}_group_{i:02d}.png", img)
+
+        # Original/current source files captured by v5.1+.
+        for logical_name, item in (sources or {}).items():
+            if not isinstance(item, dict):
+                continue
+            filename = item.get("filename") or f"{logical_name}.bin"
+            data = item.get("data")
+            if not isinstance(data, (bytes, bytearray)):
+                continue
+            safe_name = re.sub(r"[^0-9A-Za-z_\-\.\u4e00-\u9fff]+", "_", filename)
+            path = f"sources/{logical_name}__{safe_name}"
+            z.writestr(path, bytes(data))
+            manifest["source_index"][logical_name] = {
+                "filename": filename,
+                "path": path,
+            }
+
+        z.writestr(
+            "project.json",
+            json.dumps(_json_safe(manifest), ensure_ascii=False, indent=2).encode("utf-8")
+        )
+
+    return buf.getvalue()
+
+def _restore_question_images_from_zip(z, q: Question):
+    qbase = f"question_images/q{q.source_no:03d}"
+    names = set(z.namelist())
+
+    crop = f"{qbase}_crop.png"
+    body = f"{qbase}_body.png"
+    q.crop_png = z.read(crop) if crop in names else b""
+    q.body_crop_png = z.read(body) if body in names else b""
+
+    q.image_pngs = []
+    i = 0
+    while f"{qbase}_img_{i:02d}.png" in names:
+        q.image_pngs.append(z.read(f"{qbase}_img_{i:02d}.png"))
+        i += 1
+
+    q.group_crop_pngs = []
+    i = 0
+    while f"{qbase}_group_{i:02d}.png" in names:
+        q.group_crop_pngs.append(z.read(f"{qbase}_group_{i:02d}.png"))
+        i += 1
+
+def _load_annual_project_zip(zip_bytes: bytes):
+    """Restore a saved v5.1+ project into session_state."""
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
+        if "project.json" not in z.namelist():
+            raise ValueError("找不到 project.json，這不是有效的年度專案 ZIP。")
+
+        manifest = json.loads(z.read("project.json").decode("utf-8"))
+        if manifest.get("project_format") != "exam-material-tool-project-v1":
+            raise ValueError("年度專案格式不相容。")
+
+        questions = []
+        allowed = set(Question.__dataclass_fields__.keys())
+        for raw in manifest.get("questions", []):
+            qdata = {k: v for k, v in raw.items() if k in allowed}
+            # Binary values live in ZIP, not JSON.
+            qdata["crop_png"] = b""
+            qdata["body_crop_png"] = b""
+            qdata["image_pngs"] = []
+            qdata["group_crop_pngs"] = []
+            q = Question(**qdata)
+            _restore_question_images_from_zip(z, q)
+            questions.append(q)
+
+        st.session_state.questions = questions
+        st.session_state.year = int(manifest.get("year", 115))
+        st.session_state.reference_db = manifest.get(
+            "reference_db",
+            _empty_reference_db(st.session_state.year)
+        )
+
+        # Restore captured source files for future reparsing/rebuilding.
+        restored_sources = {}
+        for logical_name, info in manifest.get("source_index", {}).items():
+            path = info.get("path")
+            if path in z.namelist():
+                restored_sources[logical_name] = {
+                    "filename": info.get("filename", logical_name),
+                    "data": z.read(path),
+                }
+        st.session_state.project_sources = restored_sources
+
+        # Restore project settings. This function is called before a rerun so
+        # widgets will be created with the restored session_state values.
+        for k, v in manifest.get("settings", {}).items():
+            st.session_state[k] = v
+
+        # Synchronize overview/selection widget keys to the canonical q.selected.
+        for q in questions:
+            st.session_state[f"sel_{q.source_no}"] = bool(q.selected)
+            st.session_state[f"overview_select_{q.source_no}"] = bool(q.selected)
+
+        # Page images are optional; question crops are enough for normal workflow.
+        st.session_state.page_images = {}
+
+        return {
+            "year": st.session_state.year,
+            "questions": len(questions),
+            "publishers": {
+                p: len(st.session_state.reference_db.get("publisher", {}).get(p, {}))
+                for p in ("翰林", "康軒", "南一")
+            },
+            "history_files": len(st.session_state.reference_db.get("history_raw", {})),
+        }
+
+def _capture_source(logical_name: str, uploaded):
+    if uploaded is None:
+        return
+    if "project_sources" not in st.session_state:
+        st.session_state.project_sources = {}
+    try:
+        st.session_state.project_sources[logical_name] = {
+            "filename": uploaded.name,
+            "data": uploaded.getvalue(),
+        }
+    except Exception:
+        pass
+
+def _capture_source_list(prefix: str, uploads):
+    if "project_sources" not in st.session_state:
+        st.session_state.project_sources = {}
+    # Clear prior source slots for this category so updates are accurate.
+    for k in list(st.session_state.project_sources.keys()):
+        if k.startswith(prefix + "_"):
+            del st.session_state.project_sources[k]
+    for i, uploaded in enumerate(uploads or []):
+        _capture_source(f"{prefix}_{i:02d}", uploaded)
+
 # -----------------------------
 # Streamlit UI
 # -----------------------------
@@ -2374,6 +2576,8 @@ if "questions" not in st.session_state:
     _reset_fresh_bank_selection(st.session_state.questions)
 if "page_images" not in st.session_state:
     st.session_state.page_images = {}
+if "project_sources" not in st.session_state:
+    st.session_state.project_sources = {}
 if "year" not in st.session_state:
     st.session_state.year = 115
 
@@ -2382,6 +2586,51 @@ with st.sidebar:
     st.session_state.year = st.number_input("年度（民國）", min_value=100, max_value=150, value=int(st.session_state.year), step=1)
     st.subheader("免費版")
     st.caption("本版不使用任何外部 AI API，不需要 API Key，也不會產生 API 費用。")
+
+
+st.markdown("### 💾 年度專案")
+pc1, pc2 = st.columns([1.05, 0.95])
+
+with pc1:
+    project_upload = st.file_uploader(
+        "載入年度專案 ZIP",
+        type=["zip"],
+        key="annual_project_zip_upload",
+        help="一次恢復題庫、校對、選題、詳解、年度參考庫與設定。"
+    )
+    if st.button(
+        "📂 載入年度專案",
+        disabled=not project_upload,
+        key="load_annual_project_zip",
+        use_container_width=True
+    ):
+        try:
+            info = _load_annual_project_zip(project_upload.getvalue())
+            st.success(
+                f"已恢復 {info['year']} 年度專案：{info['questions']} 題；"
+                f"翰林 {info['publishers']['翰林']}、康軒 {info['publishers']['康軒']}、"
+                f"南一 {info['publishers']['南一']} 題；內部參考 {info['history_files']} 份。"
+            )
+            st.rerun()
+        except Exception as e:
+            st.error(f"年度專案載入失敗：{e}")
+
+with pc2:
+    if st.session_state.questions:
+        project_zip_bytes = _build_annual_project_zip()
+        st.download_button(
+            "📦 儲存目前年度專案 ZIP",
+            data=project_zip_bytes,
+            file_name=f"{int(st.session_state.year)}_會考教材年度專案.zip",
+            mime="application/zip",
+            use_container_width=True,
+            help="建議每次完成一批校對／選題／詳解後下載一次。之後換程式版本只需載入這一個檔案。"
+        )
+        st.caption("此 ZIP 是之後改版時的主要備份；不用再逐一重傳出版社、教師版與重設選題。")
+    else:
+        st.info("建立題庫後即可儲存完整年度專案。")
+
+st.divider()
 
 tab1, ref_tab, overview_tab, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 年度資料", "③ 考題總覽暨校對", "④ 篩選組題", "⑤ 詳解工作台", "⑥ 產生 Word"])
 
@@ -2456,6 +2705,12 @@ with ref_tab:
     ):
         newdb = _empty_reference_db(int(st.session_state.year))
         all_errors = []
+
+        # Save original annual source files inside the portable project ZIP.
+        _capture_source_list("hanlin", hanlin_files)
+        _capture_source_list("kangxuan", kang_files)
+        _capture_source_list("nanyi", nanyi_files)
+        _capture_source_list("history", history_files)
 
         for pub, fileset in [("翰林", hanlin_files), ("康軒", kang_files), ("南一", nanyi_files)]:
             parsed, errs = _parse_publisher_files(fileset, expected_for_refs, st.session_state.questions)
@@ -2657,6 +2912,9 @@ with tab1:
     if st.button("建立／更新題庫", type="primary", disabled=not (qfile and afile and rfile)):
         with st.spinner("解析 PDF、題號、答案與通過率…"):
             qbytes = qfile.getvalue()
+            _capture_source("question_pdf", qfile)
+            _capture_source("answer_pdf", afile)
+            _capture_source("rate_pdf", rfile)
             answers = parse_answers(afile.getvalue())
             rates = parse_pass_rates(rfile.getvalue())
             expected_count = len(answers)
@@ -3466,7 +3724,7 @@ with tab4:
             "questions": project
         }), ensure_ascii=False, indent=2)
         st.download_button(
-            "下載題庫/詳解 JSON",
+            "下載輕量題庫 JSON（不含圖片／年度來源）",
             data=project_json.encode("utf-8"),
             file_name=f"{st.session_state.year}_國文題庫.json",
             mime="application/json"
