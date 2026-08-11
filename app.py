@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.7 Word 預覽渲染修正版"
+APP_VERSION = "Web v4.8 總覽選題同步＋組題確認流程"
 
 # -----------------------------
 # Models
@@ -2982,99 +2982,140 @@ with overview_tab:
 
 with tab2:
     if not st.session_state.questions:
-        st.info("請先在「建立題庫」上傳三份來源並建立題庫。")
+        st.info("請先在「① 建立題庫」建立題庫，並到「③ 考題總覽暨校對」勾選要組題的題目。")
     else:
-        st.subheader("依通過率篩選")
-        preset = st.radio("快速條件", ["八成以上", "六成至七成", "自訂"], horizontal=True)
-        if preset == "八成以上":
-            lo, hi = 0.80, 1.00
-        elif preset == "六成至七成":
-            lo, hi = 0.60, 0.79
+        st.subheader("篩選組題／最終確認")
+        st.caption(
+            "這一頁不再重新做一套獨立篩選。"
+            "目前題目完全承接「③ 考題總覽暨校對」中勾選的結果，"
+            "此處只負責最後確認、檢查題組完整性與必要的刪減。"
+        )
+
+        qs = st.session_state.questions
+
+        # Keep groups intact: if any member is selected in overview, the whole group
+        # becomes selected here. This matches the rule used by the overview.
+        selected_group_ids = {
+            q.group_id for q in qs
+            if q.selected and (q.group_id or "").strip()
+        }
+        for q in qs:
+            if q.group_id and q.group_id in selected_group_ids:
+                q.selected = True
+
+        selected = [q for q in qs if q.selected]
+
+        if not selected:
+            st.warning("目前沒有選取任何題目。請回「③ 考題總覽暨校對」勾選要收入題本的題目。")
         else:
-            cc1, cc2 = st.columns(2)
-            lo = cc1.number_input("最低通過率", 0.0, 1.0, 0.60, 0.01)
-            hi = cc2.number_input("最高通過率", 0.0, 1.0, 0.79, 0.01)
+            group_ids = sorted({
+                q.group_id for q in selected if (q.group_id or "").strip()
+            })
 
-        keep_groups = st.checkbox("題組不可拆開（選中其中一題就保留同題組）", value=True)
+            m1,m2,m3 = st.columns(3)
+            m1.metric("目前選取題數", len(selected))
+            m2.metric("題組數", len(group_ids))
+            m3.metric("單題數", len([q for q in selected if not (q.group_id or "").strip()]))
 
-        if st.button("套用通過率篩選"):
-            qs = st.session_state.questions
-            selected_nos = {q.source_no for q in qs if q.pass_rate is not None and lo <= q.pass_rate <= hi}
-            if keep_groups:
-                group_ids = {q.group_id for q in qs if q.source_no in selected_nos and q.group_id}
-                for q in qs:
-                    if q.group_id and q.group_id in group_ids:
-                        selected_nos.add(q.source_no)
-            for q in qs:
-                q.selected = q.source_no in selected_nos
-                st.session_state[f"sel_{q.source_no}"] = q.selected
-            st.success(f"目前選取 {len(selected_nos)} 題。")
-            st.rerun()
-
-        st.divider()
-        st.markdown("### 快速指定題號")
-        st.caption("可以直接輸入：3、3,8,10、1-10、1-5,8,10,15-20。這會直接取代目前所有勾選。")
-
-        quick_spec = st.text_input(
-            "指定題號",
-            placeholder="例如：3 或 3,8,10 或 1-10",
-            key="quick_question_spec"
-        )
-
-        qc1, qc2, qc3 = st.columns(3)
-        with qc1:
-            if st.button("只選指定題號", use_container_width=True):
-                try:
-                    available = [q.source_no for q in st.session_state.questions]
-                    chosen = set(parse_question_spec(quick_spec, available))
-                    if not chosen:
-                        st.warning("沒有選到任何題目，請檢查輸入。")
-                    else:
-                        if keep_groups:
-                            group_ids = {q.group_id for q in st.session_state.questions if q.source_no in chosen and q.group_id}
-                            for q in st.session_state.questions:
-                                if q.group_id and q.group_id in group_ids:
-                                    chosen.add(q.source_no)
-                        for q in st.session_state.questions:
-                            q.selected = q.source_no in chosen
-                            st.session_state[f"sel_{q.source_no}"] = q.selected
-                        st.success("已只選：" + "、".join(map(str, sorted(chosen))))
-                        st.rerun()
-                except Exception as e:
-                    st.error(str(e))
-
-        with qc2:
-            if st.button("全部取消", use_container_width=True):
-                for q in st.session_state.questions:
-                    q.selected = False
-                    st.session_state[f"sel_{q.source_no}"] = False
-                st.rerun()
-
-        with qc3:
-            if st.button("全部選取", use_container_width=True):
-                for q in st.session_state.questions:
-                    q.selected = True
-                    st.session_state[f"sel_{q.source_no}"] = True
-                st.rerun()
-
-        selected_now = [q.source_no for q in st.session_state.questions if q.selected]
-        st.info(
-            f"目前共選取 {len(selected_now)} 題"
-            + (f"：{'、'.join(map(str, selected_now))}" if len(selected_now) <= 20 else "")
-        )
-
-        st.markdown("### 手動微調")
-        st.caption("快速選題或通過率篩選後，可在這裡做最後加減。")
-        for q in st.session_state.questions:
-            rate = "—" if q.pass_rate is None else f"{q.pass_rate:.2f}"
-            key = f"sel_{q.source_no}"
-            if key not in st.session_state:
-                st.session_state[key] = q.selected
-            new_val = st.checkbox(
-                f"原第 {q.source_no} 題｜通過率 {rate}｜答案 {q.answer or '—'}｜{q.category or '未分類'}",
-                key=key
+            st.success(
+                "目前承接總覽勾選："
+                + "、".join(str(q.source_no) for q in selected)
             )
-            q.selected = new_val
+
+            st.divider()
+            st.markdown("### 本次組題內容")
+            st.caption(
+                "若要新增題目，請回「③ 考題總覽暨校對」勾選；"
+                "這裡只提供最後取消，不會顯示未被總覽選取的題目。"
+            )
+
+            # Render units so grouped questions are confirmed as one set.
+            units=[]
+            seen=set()
+            for q in selected:
+                gid=(q.group_id or "").strip()
+                if gid:
+                    if gid in seen:
+                        continue
+                    seen.add(gid)
+                    members=sorted(
+                        [x for x in selected if (x.group_id or "").strip()==gid],
+                        key=lambda x:x.source_no
+                    )
+                    units.append(("group",gid,members))
+                else:
+                    units.append(("single",str(q.source_no),[q]))
+
+            for kind,uid,members in units:
+                if kind=="group":
+                    nos=[x.source_no for x in members]
+                    avg_rates=[
+                        float(x.pass_rate) for x in members if x.pass_rate is not None
+                    ]
+                    avg_text="—" if not avg_rates else f"{sum(avg_rates)/len(avg_rates):.2f}"
+                    st.markdown(
+                        f"**題組 {uid}｜原第 {min(nos)}～{max(nos)} 題｜"
+                        f"{len(members)} 題｜平均通過率 {avg_text}**"
+                    )
+                    for x in members:
+                        rate="—" if x.pass_rate is None else f"{x.pass_rate:.2f}"
+                        st.write(
+                            f"第 {x.source_no} 題｜答案 {x.answer or '—'}｜通過率 {rate}｜"
+                            f"{x.text[:55].replace(chr(10),' ')}"
+                        )
+
+                    if st.button(
+                        f"取消整個題組 {uid}",
+                        key=f"confirm_remove_group_{uid}",
+                        use_container_width=True
+                    ):
+                        for x in qs:
+                            if (x.group_id or "").strip()==uid:
+                                x.selected=False
+                                st.session_state[f"sel_{x.source_no}"]=False
+                                # sync overview checkbox if it exists
+                                ovkey=f"overview_group_select_{uid}"
+                                if ovkey in st.session_state:
+                                    st.session_state[ovkey]=False
+                        st.rerun()
+
+                    st.divider()
+
+                else:
+                    q=members[0]
+                    rate="—" if q.pass_rate is None else f"{q.pass_rate:.2f}"
+                    c1,c2=st.columns([0.78,0.22],vertical_alignment="center")
+                    with c1:
+                        st.markdown(
+                            f"**原第 {q.source_no} 題｜答案 {q.answer or '—'}｜通過率 {rate}**"
+                        )
+                        st.write(q.text[:120].replace("\n"," "))
+                    with c2:
+                        if st.button(
+                            "取消此題",
+                            key=f"confirm_remove_{q.source_no}",
+                            use_container_width=True
+                        ):
+                            q.selected=False
+                            st.session_state[f"sel_{q.source_no}"]=False
+                            ovkey=f"overview_select_{q.source_no}"
+                            if ovkey in st.session_state:
+                                st.session_state[ovkey]=False
+                            st.rerun()
+                    st.divider()
+
+            selected_now=[q for q in qs if q.selected]
+            st.info(
+                f"最終目前共 {len(selected_now)} 題。"
+                "確認無誤後，直接進入「⑤ 詳解工作台」。"
+            )
+
+            if st.button(
+                "↩️ 回到考題總覽重新選題",
+                key="back_to_overview_note",
+                use_container_width=True
+            ):
+                st.info("請點上方「③ 考題總覽暨校對」頁籤進行新增或重新勾選。")
 
 with tab3:
     if not st.session_state.questions:
