@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.9 新題庫預設全不選＋保留專案選題"
+APP_VERSION = "Web v5.0 人工確認即時保存＋校對狀態修正"
 
 # -----------------------------
 # Models
@@ -2189,7 +2189,7 @@ def _render_question_review_editor(q, key_prefix="overview"):
             st.info("本題目前沒有原 PDF 裁圖。")
 
     with c2:
-        st.caption("右側為可編輯校對區；修改後請按最下方「💾 儲存本題校對」。")
+        st.caption("題幹、選項、題組與版型修改後請按「💾 儲存本題校對」；「本題內容已人工確認」則勾選後立即保存。")
 
         material_edit = st.text_area(
             "閱讀／共用材料（沒有可留白）",
@@ -2241,9 +2241,15 @@ def _render_question_review_editor(q, key_prefix="overview"):
                 "保留原 PDF 裁圖作為備用／原版型輸出",
                 key=_wk("visual")
             )
+            def _save_reviewed_immediately():
+                # Checkbox state is already in session_state when callback runs.
+                q.reviewed = bool(st.session_state.get(_wk("reviewed"), False))
+
             reviewed_edit = st.checkbox(
                 "本題內容已人工確認",
-                key=_wk("reviewed")
+                key=_wk("reviewed"),
+                on_change=_save_reviewed_immediately,
+                help="勾選或取消後立即寫入本題校對狀態，不需要再按「儲存本題校對」。"
             )
 
         if render_edit == "整題圖像":
@@ -2315,7 +2321,8 @@ def _render_question_review_editor(q, key_prefix="overview"):
 
             _apply_structure_edit(
                 q, material_edit, stem_edit, oa, ob, oc, od,
-                group_edit, visual_edit, reviewed_edit
+                group_edit, visual_edit,
+                bool(st.session_state.get(_wk("reviewed"), q.reviewed))
             )
             q.render_mode = render_edit
             q.layout_style = layout_edit
