@@ -18,7 +18,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-APP_VERSION = "Web v2.9 短題防拆頁＋自然分頁"
+APP_VERSION = "Web v3.0 詳解工作台＋範本套版"
 
 # -----------------------------
 # Models
@@ -33,8 +33,10 @@ class Question:
     pass_rate: Optional[float] = None
     category: str = ""
     explanation: str = ""
+    teaching_focus: str = ""
     teaching: str = ""
     note_strategy: str = ""
+    workbench_reviewed: bool = False
     group_id: str = ""
     group_intro: str = ""
     material: str = ""
@@ -476,6 +478,13 @@ def add_question(doc, q: Question, display_no: int, year: int, teacher=False, us
         r2 = p.add_run(q.explanation or "（待補）")
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
+        if q.teaching_focus.strip():
+            p = cell.add_paragraph()
+            r = p.add_run("【教學重點】：\n")
+            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            r2 = p.add_run(q.teaching_focus)
+            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
         p = cell.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
@@ -570,6 +579,13 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(q.explanation or "（待補）")
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+        if q.teaching_focus.strip():
+            p = cell.add_paragraph()
+            r = p.add_run("【教學重點】：\n")
+            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            r2 = p.add_run(q.teaching_focus)
+            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = cell.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
@@ -686,6 +702,13 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(q.explanation or "（待補）")
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+        if q.teaching_focus.strip():
+            p = doc.add_paragraph()
+            r = p.add_run("【教學重點】：\n")
+            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            r2 = p.add_run(q.teaching_focus)
+            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = doc.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
@@ -877,6 +900,13 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
         set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(q.explanation or "（待補）")
         set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+
+        if q.teaching_focus.strip():
+            p = doc.add_paragraph()
+            r = p.add_run("【教學重點】：\n")
+            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            r2 = p.add_run(q.teaching_focus)
+            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = doc.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
@@ -1135,6 +1165,74 @@ def parse_question_spec(spec: str, available_numbers):
                 result.add(n)
     return sorted(result)
 
+
+# -----------------------------
+# Explanation workbench reference library
+# -----------------------------
+def _load_reference_library():
+    path = Path(__file__).resolve().parent / "reference_library_v30.json"
+    if not path.exists():
+        return {"publisher": {}, "strategy": {}, "history_raw": {}}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"publisher": {}, "strategy": {}, "history_raw": {}}
+
+def _publisher_analysis_only(block: str) -> str:
+    """Extract the explanation portion when headings are available.
+    Otherwise return the reference block intact so the user can judge it.
+    """
+    block = (block or "").strip()
+    for marker in ("試題解析：", "詳解：", "詳解 ", "解析："):
+        if marker in block:
+            tail = block.split(marker, 1)[1].strip()
+            if tail:
+                return tail
+    return block
+
+def _history_examples_for_category(refdb, category: str, limit=4):
+    """Show source-grounded historical excerpts around the same ability label."""
+    if not category:
+        return []
+    out = []
+    for source, raw in refdb.get("history_raw", {}).items():
+        pos = raw.find(category)
+        if pos < 0 and category == "表層文意理解":
+            pos = raw.find("表層文意")
+        if pos < 0:
+            continue
+        # Prefer a nearby teaching-step section after the ability label.
+        teach = raw.find("【教學步驟】", pos)
+        if teach >= 0 and teach - pos < 4500:
+            start = max(0, pos - 350)
+            end = min(len(raw), teach + 1600)
+        else:
+            start = max(0, pos - 350)
+            end = min(len(raw), pos + 1800)
+        excerpt = raw[start:end].strip()
+        out.append((source, excerpt))
+        if len(out) >= limit:
+            break
+    return out
+
+def _draft_explanation_from_publishers(refdb, qno: int) -> str:
+    """Free/no-API initial draft: use the most detailed available publisher analysis
+    as an editable base. This is deliberately NOT presented as an AI synthesis.
+    """
+    candidates = []
+    for pub in ("翰林", "康軒", "南一"):
+        block = refdb.get("publisher", {}).get(pub, {}).get(str(qno), "")
+        ana = _publisher_analysis_only(block)
+        if ana:
+            candidates.append((len(ana), pub, ana))
+    if not candidates:
+        return ""
+    _, pub, ana = max(candidates)
+    return ana.strip()
+
+def _strategy_for_category(refdb, category: str):
+    return refdb.get("strategy", {}).get(category) or refdb.get("strategy", {}).get("其他", {})
+
 # -----------------------------
 # Streamlit UI
 # -----------------------------
@@ -1155,7 +1253,7 @@ with st.sidebar:
     st.subheader("免費版")
     st.caption("本版不使用任何外部 AI API，不需要 API Key，也不會產生 API 費用。")
 
-tab1, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 篩選組題", "③ 編輯詳解", "④ 產生 Word"])
+tab1, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 篩選組題", "③ 詳解工作台", "④ 產生 Word"])
 
 with tab1:
     st.subheader("上傳三份來源")
@@ -1397,13 +1495,19 @@ with tab3:
     if not st.session_state.questions:
         st.info("請先建立題庫。")
     else:
+        refdb = _load_reference_library()
         selected_nums = [q.source_no for q in st.session_state.questions if q.selected]
         choices = selected_nums or [q.source_no for q in st.session_state.questions]
-        qno = st.selectbox("選擇題目", choices)
+
+        reviewed_count = sum(1 for q in st.session_state.questions if q.workbench_reviewed)
+        st.caption(f"教師詳解人工確認進度：{reviewed_count}/{len(st.session_state.questions)} 題")
+
+        qno = st.selectbox("選擇題目", choices, key="workbench_qno")
         q = next(x for x in st.session_state.questions if x.source_no == qno)
 
-        c1,c2 = st.columns([1,1])
-        with c1:
+        left, right = st.columns([0.92, 1.08])
+
+        with left:
             st.markdown(f"### 原第 {q.source_no} 題")
             if q.material.strip():
                 st.markdown("**閱讀／共用材料**")
@@ -1412,22 +1516,135 @@ with tab3:
             st.write(q.text)
             for k,v in q.options.items():
                 st.write(f"({k}) {v}")
-            st.caption(f"官方答案：{q.answer or '—'}｜通過率：{q.pass_rate if q.pass_rate is not None else '—'}｜原頁：{q.page_no}")
+            st.caption(
+                f"官方答案：{q.answer or '—'}｜通過率："
+                f"{q.pass_rate if q.pass_rate is not None else '—'}｜原頁：{q.page_no}"
+            )
             if q.crop_png:
-                st.image(q.crop_png, caption="原 PDF 題目區塊（供校對）", use_container_width=True)
-        with c2:
+                st.image(q.crop_png, caption="原 PDF 題目區塊", use_container_width=True)
+
+        with right:
+            st.markdown("### 一、三家出版社詳解")
+            pub_cols = st.columns(3)
+            for col, pub in zip(pub_cols, ["翰林", "康軒", "南一"]):
+                block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
+                with col:
+                    st.markdown(f"**{pub}**")
+                    if block:
+                        st.text_area(
+                            f"{pub}參考內容",
+                            value=block,
+                            height=290,
+                            key=f"ref_{pub}_{qno}",
+                            label_visibility="collapsed"
+                        )
+                    else:
+                        st.warning("此題目前未解析到出版社文字，請回原檔確認。")
+
+            st.markdown("### 二、歷年本團隊參考與能力類型")
+            ability_options = ["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"]
+            current = q.category if q.category in ability_options else "其他"
             q.category = st.selectbox(
                 "能力類型",
-                ["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"],
-                index=["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"].index(q.category if q.category in ["", "字詞辨識", "表層文意理解", "文意統整", "推論理解", "分析評鑑", "其他"] else "其他"),
+                ability_options,
+                index=ability_options.index(current),
                 key=f"cat_{qno}"
             )
-            q.explanation = st.text_area("解析", value=q.explanation, height=220, key=f"exp_{qno}")
-            q.teaching = st.text_area("教學步驟", value=q.teaching, height=180, key=f"teach_{qno}")
-            q.note_strategy = st.text_area("筆記策略（選填）", value=q.note_strategy, height=100, key=f"note_{qno}")
-            q.visual_mode = st.checkbox("輸出時保留原題裁圖（適合圖片／表格／複雜版面）", value=q.visual_mode, key=f"vis_{qno}")
 
-            st.caption("免費版不使用 AI；解析、教學步驟與筆記策略請直接在上方欄位編輯。")
+            strategy = _strategy_for_category(refdb, q.category)
+            if q.category:
+                with st.expander("查看歷年同能力類型的教學框架", expanded=False):
+                    st.markdown("**整理出的共通教學重點**")
+                    st.write(strategy.get("教學重點", ""))
+                    st.markdown("**整理出的共通教學步驟**")
+                    st.write(strategy.get("教學步驟", ""))
+                    examples = _history_examples_for_category(refdb, q.category)
+                    if examples:
+                        st.markdown("**112～114 年原教師版摘錄**")
+                        for source, excerpt in examples:
+                            st.markdown(f"**{source}**")
+                            st.text_area(
+                                f"{source}_{qno}",
+                                value=excerpt,
+                                height=180,
+                                key=f"hist_{source}_{qno}",
+                                label_visibility="collapsed"
+                            )
+
+            st.markdown("### 三、本次建議稿（可直接修改）")
+
+            # Initialize widget state from question object.
+            for k, value in {
+                f"exp_{qno}": q.explanation,
+                f"focus_{qno}": q.teaching_focus,
+                f"teach_{qno}": q.teaching,
+                f"note_{qno}": q.note_strategy,
+            }.items():
+                if k not in st.session_state:
+                    st.session_state[k] = value
+
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("帶入出版社解析初稿", use_container_width=True, key=f"draft_exp_{qno}"):
+                    draft = _draft_explanation_from_publishers(refdb, q.source_no)
+                    if draft:
+                        st.session_state[f"exp_{qno}"] = draft
+                        q.explanation = draft
+                        st.rerun()
+                    else:
+                        st.warning("目前沒有可帶入的出版社解析。")
+            with b2:
+                if st.button("帶入本團隊教學框架", use_container_width=True, key=f"draft_teach_{qno}"):
+                    strategy = _strategy_for_category(refdb, q.category)
+                    st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
+                    st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
+                    st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
+                    q.teaching_focus = st.session_state[f"focus_{qno}"]
+                    q.teaching = st.session_state[f"teach_{qno}"]
+                    q.note_strategy = st.session_state[f"note_{qno}"]
+                    st.rerun()
+
+            st.caption(
+                "以上兩個按鈕均為免費的規則式帶入，不使用 AI/API。"
+                "「出版社解析初稿」只是方便複製修改，不代表已完成三家綜合判斷。"
+            )
+
+            q.explanation = st.text_area(
+                "建議詳解",
+                height=260,
+                key=f"exp_{qno}"
+            )
+            q.teaching_focus = st.text_area(
+                "教學重點",
+                height=90,
+                key=f"focus_{qno}"
+            )
+            q.teaching = st.text_area(
+                "建議教學步驟",
+                height=230,
+                key=f"teach_{qno}"
+            )
+            q.note_strategy = st.text_area(
+                "筆記策略（選填）",
+                height=110,
+                key=f"note_{qno}"
+            )
+
+            q.workbench_reviewed = st.checkbox(
+                "本題詳解與教學步驟已人工確認",
+                value=q.workbench_reviewed,
+                key=f"wb_reviewed_{qno}"
+            )
+            q.visual_mode = st.checkbox(
+                "輸出時保留原題裁圖（適合圖片／表格／複雜版面）",
+                value=q.visual_mode,
+                key=f"vis_{qno}"
+            )
+
+            st.info(
+                "建議工作方式：先比較三家出版社 → 查看歷年同能力類型 → "
+                "把你要的內容貼到『建議詳解／教學步驟』修改 → 人工確認。"
+            )
 
 with tab4:
     if not st.session_state.questions:
