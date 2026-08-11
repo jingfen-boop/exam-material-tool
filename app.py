@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v4.3 考題總覽暨校對＋題組完整檢視"
+APP_VERSION = "Web v4.4 同行選項自動拆分＋考題總覽暨校對"
 
 # -----------------------------
 # Models
@@ -195,6 +195,52 @@ def _sequential_question_starts(doc, expected_count):
                     return starts
     return starts
 
+def _option_markers(text: str):
+    """Return A-D option-marker matches in visual text order.
+
+    Supports:
+      (A)  （A）  (Ａ)  （Ａ）
+    including multiple options printed on the SAME PDF line.
+    """
+    pat = re.compile(r"[\(（]\s*([ABCDＡＢＣＤ])\s*[\)）]")
+    return list(pat.finditer(text or ""))
+
+
+def _normalize_option_letter(letter: str) -> str:
+    table = {
+        "Ａ": "A", "Ｂ": "B", "Ｃ": "C", "Ｄ": "D",
+        "A": "A", "B": "B", "C": "C", "D": "D",
+    }
+    return table.get(letter, letter)
+
+
+def _split_inline_option_line(text: str):
+    """Split an option line into [(letter, value), ...].
+
+    Example:
+      "(A)①   (B)②   (C)③   (D)④"
+    becomes:
+      [("A","①"), ("B","②"), ("C","③"), ("D","④")]
+
+    Returns (prefix, pairs). `prefix` is any text before the first marker.
+    """
+    text = (text or "").strip()
+    marks = _option_markers(text)
+    if not marks:
+        return text, []
+
+    prefix = text[:marks[0].start()].strip()
+    pairs = []
+
+    for i, m in enumerate(marks):
+        letter = _normalize_option_letter(m.group(1))
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        value = text[m.end():end].strip()
+        pairs.append((letter, value))
+
+    return prefix, pairs
+
+
 def _region_text_and_options(page, y0, y1, qno):
     rows = []
     for y, x, t, bbox in _all_page_lines(page):
@@ -210,28 +256,56 @@ def _region_text_and_options(page, y0, y1, qno):
     current_opt = None
     removed_q_prefix = False
 
-    for _, _, t in rows:
+    for _, _, raw_t in rows:
+        t = (raw_t or "").strip()
+
+        # Remove official source question number once.
         if not removed_q_prefix:
             mq = re.match(rf"^{qno}\.\s*(.*)$", t)
             if mq:
-                rest = mq.group(1).strip()
+                t = mq.group(1).strip()
                 removed_q_prefix = True
-                if rest:
-                    stem_lines.append(rest)
-                continue
+                if not t:
+                    continue
 
-        mo = re.match(r"^\s*[\(（]\s*([ABCD])\s*[\)）]\s*(.*)", t)
-        if mo:
-            current_opt = mo.group(1)
-            options[current_opt] = mo.group(2).strip()
-        elif current_opt:
+        # v4.4: handle one OR MANY A-D option markers on the same PDF text line.
+        prefix, inline_pairs = _split_inline_option_line(t)
+        if inline_pairs:
+            # Any text before the first option marker belongs to the stem unless
+            # we were already inside a previous option continuation.
+            if prefix:
+                if current_opt:
+                    options[current_opt] = (
+                        options.get(current_opt, "") + " " + prefix
+                    ).strip()
+                else:
+                    stem_lines.append(prefix)
+
+            for letter, value in inline_pairs:
+                current_opt = letter
+                options[letter] = value.strip()
+            continue
+
+        # No option marker on this line: it is either an option continuation
+        # or ordinary stem text.
+        if current_opt:
             if t.startswith("【") or t.startswith("《") or t.startswith(""):
                 current_opt = None
                 stem_lines.append(t)
             else:
-                options[current_opt] = (options[current_opt] + " " + t).strip()
+                options[current_opt] = (
+                    options.get(current_opt, "") + " " + t
+                ).strip()
         else:
             stem_lines.append(t)
+
+    # Always return all four keys when any option was found. This makes
+    # structure review clearer and avoids "A contains everything, B-D blank".
+    if options:
+        options = {
+            key: _clean_option_text(options.get(key, ""))
+            for key in ["A", "B", "C", "D"]
+        }
 
     return "\n".join(stem_lines).strip(), options
 
