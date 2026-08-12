@@ -13,6 +13,8 @@ import streamlit as st
 import fitz  # PyMuPDF
 from PIL import Image
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from docx.shared import Pt, Cm, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
@@ -20,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.7 筆記策略語文知識版"
+APP_VERSION = "Web v6.12.8 參考資料完整順序解析版"
 
 # -----------------------------
 # Models
@@ -1919,6 +1921,7 @@ DEFAULT_STRATEGY_LIBRARY = {
 def _empty_reference_db(year=None):
     return {
         "format_version": "3.1",
+        "reference_parser_version": "ordered-docx-v2",
         "year": int(year) if year is not None else None,
         "publisher": {"翰林": {}, "康軒": {}, "南一": {}},
         "history_raw": {},
@@ -1961,14 +1964,58 @@ def _uploaded_file_text(uploaded):
     if ext == ".docx":
         doc = Document(io.BytesIO(data))
         parts = []
-        for p in doc.paragraphs:
-            if p.text.strip():
-                parts.append(p.text.strip())
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [c.text.strip() for c in row.cells]
-                if any(cells):
-                    parts.append(" | ".join(cells))
+
+        def _paragraph_text_with_textboxes(p):
+            # python-docx Paragraph.text can miss text stored in Word text boxes.
+            plain = (p.text or "").strip()
+            try:
+                xml_texts = [
+                    t.text for t in p._p.xpath(".//w:t")
+                    if getattr(t, "text", None)
+                ]
+                xml_joined = "".join(xml_texts).strip()
+            except Exception:
+                xml_joined = ""
+            # Prefer the richer XML text only when it genuinely contains more.
+            if xml_joined and len(xml_joined) > len(plain):
+                return xml_joined
+            return plain
+
+        # IMPORTANT: preserve the actual Word document order.
+        # The old parser appended ALL paragraphs first and ALL tables afterward.
+        # Historical teacher editions store 解析／教學步驟 inside tables, so that
+        # destroyed the relationship between a question and its teacher content.
+        for child in doc.element.body.iterchildren():
+            if child.tag == qn("w:p"):
+                p = Paragraph(child, doc)
+                s = _paragraph_text_with_textboxes(p)
+                if s:
+                    parts.append(s)
+            elif child.tag == qn("w:tbl"):
+                table = Table(child, doc)
+                for row in table.rows:
+                    cell_texts = []
+                    for cell in row.cells:
+                        # Preserve line breaks inside cells (解析／教學步驟 often
+                        # live together in one cell) instead of flattening them.
+                        cparts = []
+                        for cp in cell.paragraphs:
+                            s = _paragraph_text_with_textboxes(cp)
+                            if s:
+                                cparts.append(s)
+                        # Include nested table text if present.
+                        for nt in cell.tables:
+                            for nr in nt.rows:
+                                vals = [cc.text.strip() for cc in nr.cells if cc.text.strip()]
+                                if vals:
+                                    cparts.append(" | ".join(vals))
+                        cell_texts.append("\n".join(cparts).strip())
+                    nonempty = [x for x in cell_texts if x]
+                    if nonempty:
+                        # A one-cell teacher box remains multiline; multi-cell
+                        # pedagogical tables stay readable by column.
+                        parts.append(nonempty[0] if len(nonempty) == 1 else " | ".join(nonempty))
+
         return "\n".join(parts)
 
     if ext == ".pptx":
@@ -3519,6 +3566,77 @@ def _collect_project_settings():
                 out[k] = v
     return out
 
+class _MemoryUpload:
+    """Minimal Streamlit UploadedFile-compatible wrapper for stored project sources."""
+    def __init__(self, name, data):
+        self.name = name
+        self._data = bytes(data or b"")
+
+    def getvalue(self):
+        return self._data
+
+
+def _rebuild_reference_db_from_project_sources():
+    """Reparse captured annual source files using the CURRENT parser.
+
+    This lets users upgrade parser versions without re-uploading annual source
+    DOCX/PPTX/PDF files, as long as those originals are already stored in the
+    portable project ZIP.
+    """
+    sources = st.session_state.get("project_sources", {}) or {}
+    if not sources:
+        return None, ["專案 ZIP 內沒有保存原始年度參考檔，無法自動重解析。"]
+
+    prefix_map = {
+        "hanlin": "翰林",
+        "kangxuan": "康軒",
+        "nanyi": "南一",
+    }
+    grouped = {k: [] for k in prefix_map}
+    history = []
+
+    for logical_name, item in sources.items():
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename") or logical_name
+        data = item.get("data")
+        if not isinstance(data, (bytes, bytearray)):
+            continue
+        up = _MemoryUpload(filename, data)
+        if logical_name.startswith("history_"):
+            history.append(up)
+        else:
+            for prefix in prefix_map:
+                if logical_name.startswith(prefix + "_"):
+                    grouped[prefix].append(up)
+                    break
+
+    questions = list(st.session_state.get("questions", []) or [])
+    expected = len(questions) if questions else None
+    olddb = st.session_state.get("reference_db", _empty_reference_db(st.session_state.get("year", 115)))
+
+    newdb = _empty_reference_db(int(st.session_state.get("year", 115)))
+    newdb["drafts"] = olddb.get("drafts", {})
+    errors = []
+
+    for prefix, pub in prefix_map.items():
+        parsed, errs = _parse_publisher_files(grouped[prefix], expected, questions)
+        newdb["publisher"][pub] = parsed
+        errors.extend(errs)
+
+    for uploaded in history:
+        try:
+            newdb["history_raw"][uploaded.name] = _normalize_reference_text(
+                _uploaded_file_text(uploaded)
+            )
+        except Exception as e:
+            errors.append(f"{uploaded.name}：{e}")
+
+    newdb["reference_parser_version"] = "ordered-docx-v2"
+    st.session_state.reference_db = newdb
+    return newdb, errors
+
+
 def _build_annual_project_zip():
     """Create a single portable project ZIP containing all reusable state.
 
@@ -3835,6 +3953,7 @@ with ref_tab:
         key="build_annual_ref"
     ):
         newdb = _empty_reference_db(int(st.session_state.year))
+        newdb["reference_parser_version"] = "ordered-docx-v2"
         all_errors = []
 
         # Save original annual source files inside the portable project ZIP.
@@ -3870,6 +3989,34 @@ with ref_tab:
             st.warning("以下檔案需處理：\n- " + "\n- ".join(all_errors))
 
         st.rerun()
+
+    # v6.12.8 parser migration: reparse source files already saved in the
+    # portable project ZIP, so users do not need to upload them again.
+    if st.session_state.get("project_sources"):
+        current_parser = (st.session_state.get("reference_db", {}) or {}).get("reference_parser_version")
+        if current_parser != "ordered-docx-v2":
+            st.warning(
+                "目前參考庫是舊解析器建立的；舊版會把 DOCX 的段落與表格分開讀取，"
+                "可能造成出版社詳解或歷年教師版的解析／教學步驟遺失。"
+            )
+        if st.button(
+            "♻️ 用專案內已保存的原始檔重新解析參考庫",
+            key="reparse_saved_reference_sources",
+            use_container_width=True
+        ):
+            rebuilt, errs = _rebuild_reference_db_from_project_sources()
+            if rebuilt is not None:
+                st.success(
+                    "已用新版順序解析器重新建立參考庫："
+                    + "／".join(
+                        f"{p}{len(rebuilt.get('publisher', {}).get(p, {}))}題"
+                        for p in ("翰林", "康軒", "南一")
+                    )
+                    + f"；歷年教師版 {len(rebuilt.get('history_raw', {}))} 份。"
+                )
+                if errs:
+                    st.warning("部分來源仍需確認：\n- " + "\n- ".join(errs))
+                st.rerun()
 
     st.divider()
 
@@ -3968,6 +4115,12 @@ with ref_tab:
                 raise ValueError("這不是有效的年度參考包。")
             db.setdefault("strategy", DEFAULT_STRATEGY_LIBRARY)
             db.setdefault("drafts", {})
+            if db.get("reference_parser_version") != "ordered-docx-v2":
+                st.warning(
+                    "這份年度參考包是舊解析器建立的，可能已經缺少 DOCX 表格中的詳解／教學步驟。"
+                    "若專案 ZIP 內有保存原始檔，可使用上方「用專案內已保存的原始檔重新解析參考庫」；"
+                    "若只有這份年度 JSON，則需要重新上傳一次原始出版社／歷年教師版檔案。"
+                )
             st.session_state.reference_db = db
             st.success(f"已載入 {db.get('year', '未標示年度')} 年度參考包。")
             st.rerun()
