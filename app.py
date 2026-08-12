@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.1 工作進度快速存檔版"
+APP_VERSION = "Web v6.2 ChatGPT 檔案往返版"
 
 # -----------------------------
 # Models
@@ -3925,33 +3925,65 @@ with tab3:
         if batch_questions:
             st.subheader("🚀 本次教材整批產製（主要流程）")
             st.caption(
-                "最省事的流程：一次複製全部已選題目 → 貼給 ChatGPT → "
-                "把 ChatGPT 完整回覆一次貼回來 → 按一次匯入。"
-                "不需要逐題複製，也不需要自己拆成不同欄位。"
+                "主要流程：下載一個分析包檔案 → 直接傳給 ChatGPT → "
+                "ChatGPT 回傳 JSON 檔 → 上傳回程式 → 預檢後按一次匯入。"
+                "不需要查看 JSON，也不需要逐題複製或拆欄位。"
             )
             batch_ids = "、".join(f"第{q.source_no}題" for q in batch_questions)
             st.info(f"目前整批處理 {len(batch_questions)} 題：{batch_ids}")
 
             batch_package = _build_batch_chatgpt_package(refdb, batch_questions)
-            with st.expander("步驟 1｜📋 複製本次全部題目的分析包", expanded=False):
-                st.text_area("整批分析包", value=batch_package, height=480,
-                             key="batch_chatgpt_package")
-                st.download_button(
-                    "⬇️ 下載整批分析包 TXT",
-                    data=batch_package.encode("utf-8"),
-                    file_name=f"{int(st.session_state.year)}_本次選題_ChatGPT整批分析包.txt",
-                    mime="text/plain", key="download_batch_chatgpt_package",
-                    use_container_width=True
+
+            st.markdown("#### 步驟 1｜下載分析包，直接傳給 ChatGPT")
+            st.caption(
+                "不用複製長文字。下載後，把這個 TXT 檔直接上傳到目前的 ChatGPT 對話，"
+                "並請 ChatGPT「依檔案要求完成全部題目，回傳 JSON 檔」。"
+            )
+            st.download_button(
+                "⬇️ 下載「本次選題 ChatGPT 分析包」",
+                data=batch_package.encode("utf-8"),
+                file_name=f"{int(st.session_state.year)}_本次選題_ChatGPT分析包.txt",
+                mime="text/plain",
+                key="download_batch_chatgpt_package_fileflow",
+                use_container_width=True,
+                type="primary"
+            )
+
+            with st.expander("備用：查看／複製分析包文字", expanded=False):
+                st.text_area(
+                    "整批分析包文字",
+                    value=batch_package,
+                    height=420,
+                    key="batch_chatgpt_package_text_backup"
                 )
 
-            st.markdown("**步驟 2｜把整份分析包貼到 ChatGPT。**")
-            st.markdown("**步驟 3｜把 ChatGPT 回傳的完整 JSON 原封不動貼到下面。不要自己拆欄位，也不要修改 JSON。**")
-            st.text_area(
-                "貼上 ChatGPT 完整 JSON 回覆",
-                height=400,
-                key="batch_chatgpt_result",
-                placeholder="整份 JSON 直接貼上即可；即使外面有 ```json 程式碼框，v5.9 也會自動去除。"
+            st.markdown("#### 步驟 2｜把 ChatGPT 回傳的 JSON 檔上傳回來")
+            st.caption(
+                "ChatGPT 完成後，下載它提供的 .json 檔，再直接上傳到這裡。"
+                "程式會自動預檢題數與五個欄位，不需要打開 JSON，也不用複製貼上。"
             )
+            result_json_file = st.file_uploader(
+                "上傳 ChatGPT 完成稿 JSON",
+                type=["json"],
+                key="batch_chatgpt_json_upload",
+                help="請上傳 ChatGPT 依本次分析包產生的 JSON 完成稿。"
+            )
+
+            uploaded_json_text = ""
+            if result_json_file is not None:
+                try:
+                    uploaded_json_text = result_json_file.getvalue().decode("utf-8-sig")
+                    st.session_state["batch_chatgpt_result"] = uploaded_json_text
+                except Exception as e:
+                    st.error(f"JSON 檔讀取失敗：{e}")
+
+            with st.expander("備用：沒有 JSON 檔時，改用貼上完整 JSON", expanded=False):
+                st.text_area(
+                    "貼上 ChatGPT 完整 JSON 回覆",
+                    height=300,
+                    key="batch_chatgpt_result",
+                    placeholder="只有無法取得 JSON 檔時才需要使用這裡。"
+                )
 
             pasted_batch = st.session_state.get("batch_chatgpt_result", "")
             preview_parsed, preview_errors = _parse_batch_chatgpt_result(
