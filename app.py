@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.9 JSON 批次整合＋匯入預檢"
+APP_VERSION = "Web v6.1 工作進度快速存檔版"
 
 # -----------------------------
 # Models
@@ -3032,6 +3032,7 @@ with pc1:
         key="annual_project_zip_upload",
         help="一次恢復題庫、校對、選題、詳解、年度參考庫與設定。"
     )
+    st.caption("若你昨天已下載「工作進度 ZIP」或「年度專案 ZIP」，今天直接從這裡載入即可。")
     if st.button(
         "📂 載入年度專案",
         disabled=not project_upload,
@@ -3053,14 +3054,14 @@ with pc2:
     if st.session_state.questions:
         project_zip_bytes = _build_annual_project_zip()
         st.download_button(
-            "📦 儲存目前年度專案 ZIP",
+            "📦 儲存／備份完整年度專案 ZIP",
             data=project_zip_bytes,
             file_name=f"{int(st.session_state.year)}_會考教材年度專案.zip",
             mime="application/zip",
             use_container_width=True,
             help="建議每次完成一批校對／選題／詳解後下載一次。之後換程式版本只需載入這一個檔案。"
         )
-        st.caption("此 ZIP 是之後改版時的主要備份；不用再逐一重傳出版社、教師版與重設選題。")
+        st.caption("此 ZIP 同時是「改版備份」與「跨天續作存檔」；不用重新上傳資料或重做選題。")
     else:
         st.info("建立題庫後即可儲存完整年度專案。")
 
@@ -3883,6 +3884,34 @@ with tab3:
     if not st.session_state.questions:
         st.info("請先建立題庫。")
     else:
+        st.markdown("### 💾 工作進度存檔")
+        st.caption(
+            "如果今天做到一半要休息、關閉瀏覽器或關電腦，請先下載這個 ZIP。"
+            "下次開啟程式後，在頁面上方「年度專案」區載入同一個 ZIP，就能接續目前進度。"
+        )
+
+        quick_project_zip = _build_annual_project_zip()
+        save_col1, save_col2 = st.columns([0.72, 0.28])
+        with save_col1:
+            st.download_button(
+                "💾 休息／關機前：儲存目前工作進度 ZIP",
+                data=quick_project_zip,
+                file_name=f"{int(st.session_state.year)}_會考教材_工作進度.zip",
+                mime="application/zip",
+                key="quick_save_work_progress",
+                use_container_width=True,
+                type="primary",
+                help="會保存目前題庫、校對、選題、詳解、教學步驟、參考庫與設定。"
+            )
+        with save_col2:
+            st.info("下次：載入 ZIP → 繼續編輯")
+
+        st.warning(
+            "提醒：Streamlit Cloud 的暫存工作階段不保證關機後仍存在。"
+            "真正可跨天接續的依據是你下載到電腦裡的工作進度 ZIP。"
+        )
+        st.divider()
+
         refdb = _load_reference_library()
         if refdb.get("year") != int(st.session_state.year):
             st.warning(
@@ -3894,7 +3923,7 @@ with tab3:
 
         batch_questions = _selected_questions_for_batch()
         if batch_questions:
-            st.subheader("🚀 本次選題整批 ChatGPT 整合（JSON穩定版）")
+            st.subheader("🚀 本次教材整批產製（主要流程）")
             st.caption(
                 "最省事的流程：一次複製全部已選題目 → 貼給 ChatGPT → "
                 "把 ChatGPT 完整回覆一次貼回來 → 按一次匯入。"
@@ -3972,11 +4001,12 @@ with tab3:
                 count = st.session_state.pop("batch_import_count")
                 errs = st.session_state.pop("batch_import_errors", [])
                 if count:
-                    st.success(f"已成功匯入 {count} 題。下方逐題欄位只需檢查與微調。")
+                    st.success(f"已成功匯入 {count} 題。接下來直接往下逐題檢查與微調，不需要再貼任何 ChatGPT 內容。")
+                    st.info("下一步：逐題確認【三家比較筆記】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】；若某一題真的需要重做，再展開該題的「進階／單題重做」。")
                 if errs:
                     st.warning("；".join(errs))
             st.divider()
-            st.caption("以下為逐題檢查／微調區。一般不需要再逐題貼 ChatGPT 內容。")
+            st.caption("以下只做逐題校閱與人工修改。正常流程不需要再複製或貼上 ChatGPT 回覆。")
 
         selected_nums = [q.source_no for q in st.session_state.questions if q.selected]
         choices = selected_nums or [q.source_no for q in st.session_state.questions]
@@ -4055,73 +4085,75 @@ with tab3:
                             label_visibility="collapsed"
                         )
 
-            st.markdown("### 三、單題 ChatGPT 重做（選用）")
-            st.caption(
-                "這裡會把「今年題目＋三家出版社＋本團隊歷年同能力類型寫法＋教學框架」"
-                "整理成一份完整分析包。你可以直接複製到目前的 ChatGPT 對話，"
-                "讓 ChatGPT 依指定格式產生更接近可直接使用的詳解與教學步驟。"
-            )
-
-            analysis_package = _build_chatgpt_analysis_package(refdb, q)
-            with st.expander("📋 查看／複製本題 ChatGPT 分析包", expanded=False):
-                st.text_area(
-                    "本題分析包",
-                    value=analysis_package,
-                    height=420,
-                    key=f"chatgpt_package_{qno}",
-                    help="全選後複製到 ChatGPT 即可。"
-                )
-                st.download_button(
-                    "⬇️ 下載本題分析包 TXT",
-                    data=analysis_package.encode("utf-8"),
-                    file_name=f"{int(st.session_state.year)}_第{qno}題_ChatGPT分析包.txt",
-                    mime="text/plain",
-                    key=f"download_chatgpt_package_{qno}",
-                    use_container_width=True
+            with st.expander("進階／單題重做：ChatGPT 整合（平常不需要開啟）", expanded=False):
+                st.caption("只有某一題需要個別重做時才使用。一般產製請使用本頁最上方的「本次教材整批產製」流程。")
+                st.markdown("### 三、單題 ChatGPT 重做（選用）")
+                st.caption(
+                    "這裡會把「今年題目＋三家出版社＋本團隊歷年同能力類型寫法＋教學框架」"
+                    "整理成一份完整分析包。你可以直接複製到目前的 ChatGPT 對話，"
+                    "讓 ChatGPT 依指定格式產生更接近可直接使用的詳解與教學步驟。"
                 )
 
-            st.markdown("**把 ChatGPT 回傳的五段整合稿貼回來：**")
-            pasted_result = st.text_area(
-                "ChatGPT 整合結果",
-                height=300,
-                key=f"chatgpt_result_{qno}",
-                placeholder="請貼上包含【三家比較筆記】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】的完整結果。"
-            )
+                analysis_package = _build_chatgpt_analysis_package(refdb, q)
+                with st.expander("📋 查看／複製本題 ChatGPT 分析包", expanded=False):
+                    st.text_area(
+                        "本題分析包",
+                        value=analysis_package,
+                        height=420,
+                        key=f"chatgpt_package_{qno}",
+                        help="全選後複製到 ChatGPT 即可。"
+                    )
+                    st.download_button(
+                        "⬇️ 下載本題分析包 TXT",
+                        data=analysis_package.encode("utf-8"),
+                        file_name=f"{int(st.session_state.year)}_第{qno}題_ChatGPT分析包.txt",
+                        mime="text/plain",
+                        key=f"download_chatgpt_package_{qno}",
+                        use_container_width=True
+                    )
 
-            def _import_chatgpt_result_callback():
-                parsed, err = _parse_chatgpt_integrated_result(
-                    st.session_state.get(f"chatgpt_result_{qno}", "")
+                st.markdown("**把 ChatGPT 回傳的五段整合稿貼回來：**")
+                pasted_result = st.text_area(
+                    "ChatGPT 整合結果",
+                    height=300,
+                    key=f"chatgpt_result_{qno}",
+                    placeholder="請貼上包含【三家比較筆記】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】的完整結果。"
                 )
-                if err:
-                    st.session_state[f"chatgpt_import_error_{qno}"] = err
-                    return
 
-                st.session_state[f"syn_{qno}"] = parsed["synthesis_notes"]
-                st.session_state[f"exp_{qno}"] = parsed["explanation"]
-                st.session_state[f"focus_{qno}"] = parsed["teaching_focus"]
-                st.session_state[f"teach_{qno}"] = parsed["teaching"]
-                st.session_state[f"note_{qno}"] = parsed["note_strategy"]
+                def _import_chatgpt_result_callback():
+                    parsed, err = _parse_chatgpt_integrated_result(
+                        st.session_state.get(f"chatgpt_result_{qno}", "")
+                    )
+                    if err:
+                        st.session_state[f"chatgpt_import_error_{qno}"] = err
+                        return
 
-                q.synthesis_notes = parsed["synthesis_notes"]
-                q.explanation = parsed["explanation"]
-                q.teaching_focus = parsed["teaching_focus"]
-                q.teaching = parsed["teaching"]
-                q.note_strategy = parsed["note_strategy"]
-                st.session_state[f"chatgpt_import_success_{qno}"] = True
+                    st.session_state[f"syn_{qno}"] = parsed["synthesis_notes"]
+                    st.session_state[f"exp_{qno}"] = parsed["explanation"]
+                    st.session_state[f"focus_{qno}"] = parsed["teaching_focus"]
+                    st.session_state[f"teach_{qno}"] = parsed["teaching"]
+                    st.session_state[f"note_{qno}"] = parsed["note_strategy"]
 
-            st.button(
-                "⬇️ 匯入 ChatGPT 整合稿到本題欄位",
-                key=f"import_chatgpt_result_{qno}",
-                on_click=_import_chatgpt_result_callback,
-                use_container_width=True,
-                type="primary"
-            )
+                    q.synthesis_notes = parsed["synthesis_notes"]
+                    q.explanation = parsed["explanation"]
+                    q.teaching_focus = parsed["teaching_focus"]
+                    q.teaching = parsed["teaching"]
+                    q.note_strategy = parsed["note_strategy"]
+                    st.session_state[f"chatgpt_import_success_{qno}"] = True
 
-            import_err = st.session_state.pop(f"chatgpt_import_error_{qno}", None)
-            if import_err:
-                st.error(f"匯入失敗：{import_err}")
-            if st.session_state.pop(f"chatgpt_import_success_{qno}", False):
-                st.success("已把 ChatGPT 整合稿拆入本題五個欄位，可在下方繼續人工修改。")
+                st.button(
+                    "⬇️ 匯入 ChatGPT 整合稿到本題欄位",
+                    key=f"import_chatgpt_result_{qno}",
+                    on_click=_import_chatgpt_result_callback,
+                    use_container_width=True,
+                    type="primary"
+                )
+
+                import_err = st.session_state.pop(f"chatgpt_import_error_{qno}", None)
+                if import_err:
+                    st.error(f"匯入失敗：{import_err}")
+                if st.session_state.pop(f"chatgpt_import_success_{qno}", False):
+                    st.success("已把 ChatGPT 整合稿拆入本題五個欄位，可在下方繼續人工修改。")
 
             st.markdown("### 四、三家比較筆記")
             if f"syn_{qno}" not in st.session_state:
