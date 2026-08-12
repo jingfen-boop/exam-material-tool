@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.3 能力類型 AI 建議＋人工調整版"
+APP_VERSION = "Web v6.4 JSON 八欄完整匯入版"
 
 # -----------------------------
 # Models
@@ -2829,30 +2829,38 @@ def _parse_batch_chatgpt_result(text, questions):
 
 
 def _apply_batch_chatgpt_result(parsed_all, questions):
+    """Apply all 8 ChatGPT fields to the model.
+
+    Important Streamlit rule:
+    Do NOT write directly to widget-owned session_state keys here.
+    On the next rerun the workbench synchronizer will populate widget state
+    from the Question model before rendering the text areas.
+    """
     by_no={str(q.source_no):q for q in questions}
     count=0
     for no,parsed in parsed_all.items():
         q=by_no.get(str(no))
         if q is None:
             continue
-        qno=q.source_no
+
         q.suggested_category = parsed.get("suggested_category", "")
         q.alternative_category = parsed.get("alternative_category", "")
         q.category_reason = parsed.get("category_reason", "")
-        # If the user has not yet chosen a final category, prefill the AI recommendation.
+
+        # AI category is a recommendation. Only prefill final category when blank.
         if not (q.category or "").strip() and q.suggested_category:
             q.category = q.suggested_category
-            st.session_state[f"cat_{qno}"] = q.category
-        st.session_state[f"syn_{qno}"]=parsed["synthesis_notes"]
-        st.session_state[f"exp_{qno}"]=parsed["explanation"]
-        st.session_state[f"focus_{qno}"]=parsed["teaching_focus"]
-        st.session_state[f"teach_{qno}"]=parsed["teaching"]
-        st.session_state[f"note_{qno}"]=parsed["note_strategy"]
-        q.synthesis_notes=parsed["synthesis_notes"]
-        q.explanation=parsed["explanation"]
-        q.teaching_focus=parsed["teaching_focus"]
-        q.teaching=parsed["teaching"]
-        q.note_strategy=parsed["note_strategy"]
+
+        # The five content fields are the ChatGPT finished draft and must be
+        # imported directly instead of waiting for the rule-based backup button.
+        q.synthesis_notes = parsed.get("synthesis_notes", "")
+        q.explanation = parsed.get("explanation", "")
+        q.teaching_focus = parsed.get("teaching_focus", "")
+        q.teaching = parsed.get("teaching", "")
+        q.note_strategy = parsed.get("note_strategy", "")
+
+        # Mark for a one-time safe widget-state synchronization on the next rerun.
+        st.session_state[f"_chatgpt_sync_{q.source_no}"] = True
         count+=1
     return count
 
@@ -4148,6 +4156,19 @@ with tab3:
                     else:
                         st.info("目前年度參考庫沒有辨識到這一題，請回「① 年度資料」檢查來源檔。")
 
+            # v6.4: after JSON import, synchronize the Question model into
+            # widget state BEFORE those widgets are instantiated in this rerun.
+            # This prevents stale/blank widget state from hiding imported content.
+            if st.session_state.pop(f"_chatgpt_sync_{qno}", False):
+                st.session_state[f"cat_{qno}"] = q.category or ""
+                st.session_state[f"syn_{qno}"] = q.synthesis_notes or ""
+                st.session_state[f"exp_{qno}"] = q.explanation or ""
+                st.session_state[f"focus_{qno}"] = q.teaching_focus or ""
+                st.session_state[f"teach_{qno}"] = q.teaching or ""
+                st.session_state[f"note_{qno}"] = q.note_strategy or ""
+                st.session_state[f"custom_cat_{qno}"] = ""
+                st.session_state[f"chatgpt_full_import_notice_{qno}"] = True
+
             st.markdown("### 二、能力類型：AI 建議＋人工確認")
             if getattr(q, "suggested_category", ""):
                 st.success(f"AI 建議：**{q.suggested_category}**")
@@ -4271,7 +4292,7 @@ with tab3:
                 if import_err:
                     st.error(f"匯入失敗：{import_err}")
                 if st.session_state.pop(f"chatgpt_import_success_{qno}", False):
-                    st.success("已把 ChatGPT 整合稿拆入本題五個欄位，可在下方繼續人工修改。")
+                    st.success("已匯入 ChatGPT 完成稿，可在下方直接檢查與人工修改。")
 
             st.markdown("### 四、三家比較筆記")
             if f"syn_{qno}" not in st.session_state:
@@ -4284,10 +4305,12 @@ with tab3:
 
             st.markdown("### 五、本次整合建議稿（人工可修改）")
             st.caption(
-                "可先按「✨ 產生本題整合建議初稿」自動帶入可修改內容。"
-                "初稿只使用本年度已解析的出版社資料與本團隊教學框架，不會把單一出版社直接當成最終答案；"
-                "請教師完成三家比較後再人工修訂定稿。"
+                "正常流程：上傳 ChatGPT 完成稿 JSON 後，三家比較筆記、建議詳解、教學重點、"
+                "建議教學步驟與筆記策略會直接帶入；教師只需檢查與修改。"
+                "下方「產生規則式整合初稿」僅供沒有 ChatGPT 完成稿時備用，正常情況不需按。"
             )
+            if st.session_state.pop(f"chatgpt_full_import_notice_{qno}", False):
+                st.success("已完整匯入 ChatGPT 完成稿：能力類型建議＋三家比較筆記＋四項教材內容。可直接人工校訂。")
 
             # Apply saved annual draft if available and the fields are still empty.
             saved = refdb.get("drafts", {}).get(str(q.source_no), {})
@@ -4332,7 +4355,7 @@ with tab3:
             draft_c1, draft_c2 = st.columns(2)
             with draft_c1:
                 st.button(
-                    "⚙️ 產生規則式整合初稿（備用）",
+                    "⚙️ 備用：產生規則式整合初稿",
                     key=f"build_integrated_draft_{qno}",
                     use_container_width=True,
                     help="依本年度已解析的三家出版社詳解＋本團隊能力類型教學框架產生可修改初稿。此功能不使用外部 AI/API。",
