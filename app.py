@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.5 同題型完整解析教學摘錄版"
+APP_VERSION = "Web v6.12.6 歷年教師版完整題塊精準版"
 
 # -----------------------------
 # Models
@@ -2376,87 +2376,99 @@ def _publisher_analysis_only(block: str) -> str:
     return block
 
 def _history_question_blocks(raw: str):
-    """Split internal teacher-edition files into COMPLETE question blocks.
+    """Split historical TEACHER editions into complete per-question blocks.
 
-    A complete historical block includes:
+    A complete block should contain:
     題目＋選項＋解析＋教學重點＋教學步驟＋筆記策略（若有）。
 
-    v6.12.4 used the next line beginning with "1."/"2." as the end boundary.
-    That can be a numbered teaching step, which is why the UI sometimes showed
-    only the question and omitted the explanation/teaching content.
-
-    v6.12.5 uses the NEXT QUESTION'S metadata as the anchor. The real next
-    question start is the nearest question-looking line immediately BEFORE that
-    next metadata marker; numbered teaching steps occur earlier and are therefore
-    retained inside the current block.
+    Key rule in v6.12.6:
+    Teacher-edition real question starts normally carry the answer bracket,
+    e.g. 「（C）1.」. Numbered teaching steps such as 「1. 先請學生……」
+    do NOT carry an answer bracket. Therefore we use answer-bearing starts as
+    the primary structural boundary and no longer let teaching-step numbers
+    truncate the historical excerpt.
     """
-    raw=_normalize_reference_text(raw or "")
+    raw = _normalize_reference_text(raw or "")
     if not raw:
         return []
 
-    cats=[c for c in ABILITY_OPTIONS if c and c != "其他"]
-    cat_alt="|".join(re.escape(c) for c in cats)
+    cats = [c for c in ABILITY_OPTIONS if c and c != "其他"]
+    cat_alt = "|".join(re.escape(c) for c in cats)
 
-    # Historical metadata is concatenated, e.g. 112會考-30.75字詞辨識 means
-    # source question 3 + pass rate 0.75. Capture qno as 1–2 digits followed
-    # by a 0.xx pass rate when available.
-    meta_re=re.compile(
+    # Historical metadata, e.g. 112會考-30.75字詞辨識
+    # means source question 3, pass rate 0.75.
+    meta_re = re.compile(
         rf"(?P<year>\d{{3}})\s*會考\s*-\s*"
         rf"(?P<qno>\d{{1,2}})(?P<rate>0\.\d+)?\s*"
         rf"(?P<category>{cat_alt})"
     )
-    metas=list(meta_re.finditer(raw))
+    metas = list(meta_re.finditer(raw))
     if not metas:
         return []
 
-    # A broad candidate detector is OK for starts; END boundaries are resolved
-    # relative to the next metadata marker so numbered teaching steps are safe.
-    qstart_re=re.compile(
+    # Primary boundary: teacher-edition question starts WITH answer brackets.
+    answer_qstart_re = re.compile(
         r"(?m)^[ \t]*"
-        r"(?:[（(][ \t]*[A-DＡ-Ｄ]?[ \t]*[）)][ \t]*)?"
+        r"[（(][ \t]*(?P<ans>[A-DＡ-Ｄ])[ \t]*[）)][ \t]*"
         r"(?P<num>\d{1,2})[\.、．][ \t]*"
     )
-    qstarts=list(qstart_re.finditer(raw))
+    answer_starts = list(answer_qstart_re.finditer(raw))
 
-    blocks=[]
-    for idx,meta in enumerate(metas):
-        pos=meta.start()
+    # Secondary fallback only for unusual historical files without answer brackets.
+    generic_qstart_re = re.compile(
+        r"(?m)^[ \t]*(?P<num>\d{1,2})[\.、．][ \t]*"
+    )
+    generic_starts = list(generic_qstart_re.finditer(raw))
 
-        # Current question start = nearest question-looking line before metadata.
-        preceding=[m for m in qstarts if m.start() <= pos]
-        start_match=preceding[-1] if preceding else None
-        start_pos=start_match.start() if start_match else max(0,pos-500)
+    blocks = []
+    for idx, meta in enumerate(metas):
+        pos = meta.start()
+        qno = int(meta.group("qno"))
 
-        # Current question end = actual start of the NEXT question, identified
-        # as the nearest question-looking line before the NEXT metadata marker.
-        if idx + 1 < len(metas):
-            next_meta=metas[idx+1]
-            between=[m for m in qstarts if pos < m.start() <= next_meta.start()]
-            if between:
-                # The nearest candidate to next metadata is the next question stem;
-                # teaching-step numbers sit earlier in this interval.
-                end_pos=between[-1].start()
-            else:
-                end_pos=next_meta.start()
+        # Current question start: prefer nearest answer-bearing start whose
+        # displayed number matches metadata source number.
+        preceding_answer = [m for m in answer_starts if m.start() <= pos]
+        matching_answer = [m for m in preceding_answer if int(m.group("num")) == qno]
+        if matching_answer:
+            start_pos = matching_answer[-1].start()
+        elif preceding_answer:
+            start_pos = preceding_answer[-1].start()
         else:
-            end_pos=len(raw)
+            # Rare fallback: nearest generic start before metadata.
+            preceding_generic = [m for m in generic_starts if m.start() <= pos]
+            start_pos = preceding_generic[-1].start() if preceding_generic else max(0, pos - 500)
 
-        # Defensive cap only for malformed last questions / unusual source files.
-        # Prefer keeping teacher content over truncating at numbered steps.
-        if end_pos - start_pos > 9000:
-            # If a later explicit new section/booklet heading exists, stop there.
-            heading_hits=[
-                raw.find("\n壹、", pos+1),
-                raw.find("\n貳、", pos+1),
+        # End boundary:
+        # Prefer the first answer-bearing question start AFTER current metadata.
+        # This safely keeps all numbered teaching steps inside the current block.
+        next_answer = next((m for m in answer_starts if m.start() > pos), None)
+        if next_answer:
+            end_pos = next_answer.start()
+        elif idx + 1 < len(metas):
+            # If answer brackets are missing, use next metadata as a safe ceiling.
+            next_meta = metas[idx + 1]
+            # Try a generic question start close before next metadata, but only
+            # within a limited window to avoid selecting an early teaching step.
+            nearby = [
+                m for m in generic_starts
+                if pos < m.start() < next_meta.start()
+                and (next_meta.start() - m.start()) <= 1400
             ]
-            heading_hits=[x for x in heading_hits if x >= 0]
-            end_pos=min(heading_hits) if heading_hits else min(len(raw), start_pos+9000)
+            end_pos = nearby[-1].start() if nearby else next_meta.start()
+        else:
+            end_pos = len(raw)
 
-        block=raw[start_pos:end_pos].strip()
+        # Defensive guardrail for malformed extraction.
+        if end_pos <= start_pos:
+            end_pos = min(len(raw), max(pos + 2500, start_pos + 1200))
+        if end_pos - start_pos > 12000:
+            end_pos = min(len(raw), start_pos + 12000)
+
+        block = raw[start_pos:end_pos].strip()
         if block:
             blocks.append({
                 "year": meta.group("year"),
-                "qno": meta.group("qno"),
+                "qno": str(qno),
                 "category": meta.group("category"),
                 "text": block,
             })
@@ -4815,7 +4827,7 @@ with tab3:
                 )
                 examples = _history_examples_for_category(refdb, q.category)
                 with st.expander(f"查看歷年同題型教師版摘錄（{len(examples)} 題）", expanded=False):
-                    st.caption("只顯示與本題目前「能力類型」相同的歷年題目；每題保留題目、解析、教學重點、教學步驟與筆記策略（若原檔有）。")
+                    st.caption("只顯示與本題目前「能力類型」相同的歷年教師版題目；每則應完整包含題目、解析、教學重點、教學步驟與筆記策略（原檔有的欄位才顯示）。")
                     if not examples:
                         st.caption("目前年度參考包內沒有找到同能力類型的歷年題目。")
                     for source, excerpt in examples:
