@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.8 批次回覆寬鬆辨識＋匯入預檢"
+APP_VERSION = "Web v5.9 JSON 批次整合＋匯入預檢"
 
 # -----------------------------
 # Models
@@ -2638,154 +2638,135 @@ def _build_batch_chatgpt_package(refdb, questions):
             f"====================\n【題目識別】第{q.source_no}題\n====================\n"
             + _build_chatgpt_analysis_package(refdb, q)
         )
-    header = """你現在要一次處理本次教材已選取的多題「國中教育會考國文教師版」內容。
-請逐題完成，不可漏題，也不要合併不同題目的內容。
 
-每題請嚴格使用以下格式：
-=====【第X題】=====
-【三家比較筆記】
-（內容）
-【建議詳解】
-（內容）
-【教學重點】
-（內容）
-【建議教學步驟】
-（內容）
-【筆記策略】
-（內容）
-=====【第X題結束】=====
+    required_nos = [str(q.source_no) for q in questions]
+    schema_example = {
+        "format": "exam_material_v1",
+        "questions": [
+            {
+                "question_no": required_nos[0] if required_nos else "1",
+                "三家比較筆記": "完整內容",
+                "建議詳解": "完整內容",
+                "教學重點": "完整內容",
+                "建議教學步驟": "完整內容",
+                "筆記策略": "完整內容"
+            }
+        ]
+    }
 
-請參照本團隊歷年教師版的詳略、語氣、結構與教學步驟寫法，針對今年新題重新撰寫。
-詳解需說清楚答案依據；教學步驟需具體可操作；不要只拼接出版社原文。
-若來源不足，請標示「需人工確認」。請保留每題起訖標記供程式自動匯入。
+    header = f"""你現在要一次處理本次教材已選取的多題「國中教育會考國文教師版」內容。
+本次必須完成的題號：{", ".join(required_nos)}
+
+請逐題分析今年新題，參照三家出版社詳解、本團隊歷年教師版與教學框架，產生可直接人工校訂的整合稿。
+
+內容要求：
+1. 每一題都必須完成，不可漏題，也不可把題組中的不同子題合併成同一題。
+2. 參照本團隊歷年教師版的詳略、語氣、結構與教學步驟寫法。
+3. 「建議詳解」必須說清楚答案依據；適合時補充錯誤選項辨析。
+4. 「建議教學步驟」必須具體、連貫、可操作，不可只寫「讀題、找線索、排除」。
+5. 不要只是拼接三家出版社原文，要針對今年題目重新整合撰寫。
+6. 若資料不足，請在對應欄位明確寫「需人工確認」，不要杜撰。
+7. 回覆時「只能輸出一個 JSON 物件」，不要加前言、後記、Markdown 說明或 ```json 程式碼圍欄。
+8. question_no 必須使用阿拉伯數字題號，並與本次題號完全一致。
+9. 每題固定包含以下五個欄位，欄位名稱不可更改：
+   三家比較筆記、建議詳解、教學重點、建議教學步驟、筆記策略。
+
+JSON 結構範例：
+{json.dumps(schema_example, ensure_ascii=False, indent=2)}
 
 以下為本次全部題目資料：
 """
     return header + "\n\n" + "\n\n".join(parts)
 
 
-def _normalize_batch_heading(s):
-    s = (s or "").strip()
-    s = re.sub(r"^[#>*\-\s]+", "", s)
-    s = s.replace("：", ":")
-    return s.strip()
+def _clean_json_reply(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    # Remove common Markdown code fences if ChatGPT included them anyway.
+    raw = re.sub(r"^\s*```(?:json)?\s*", "", raw, flags=re.I)
+    raw = re.sub(r"\s*```\s*$", "", raw)
+    raw = raw.strip()
 
-
-def _extract_flexible_sections(body):
-    """Accept bracket headings, Markdown headings, bold headings, and plain headings."""
-    aliases = {
-        "三家比較筆記": ["三家比較筆記", "三家比較", "出版社比較筆記", "出版社比較"],
-        "建議詳解": ["建議詳解", "詳解"],
-        "教學重點": ["教學重點"],
-        "建議教學步驟": ["建議教學步驟", "教學步驟"],
-        "筆記策略": ["筆記策略"],
-    }
-
-    positions = []
-    for canonical, names in aliases.items():
-        for name in names:
-            patterns = [
-                rf"【\s*{re.escape(name)}\s*】",
-                rf"(?m)^\s*#{1,6}\s*{re.escape(name)}\s*[:：]?\s*$",
-                rf"(?m)^\s*\*\*\s*{re.escape(name)}\s*[:：]?\s*\*\*\s*$",
-                rf"(?m)^\s*{re.escape(name)}\s*[:：]\s*$",
-            ]
-            for pat in patterns:
-                for m in re.finditer(pat, body):
-                    positions.append((m.start(), m.end(), canonical))
-    if not positions:
-        return {}, "找不到五個內容標題。"
-
-    # Keep earliest occurrence for each canonical heading, then sort by position.
-    earliest = {}
-    for s, e, c in positions:
-        if c not in earliest or s < earliest[c][0]:
-            earliest[c] = (s, e, c)
-    ordered = sorted(earliest.values(), key=lambda x: x[0])
-
-    found = {}
-    for i, (s, e, c) in enumerate(ordered):
-        next_s = ordered[i + 1][0] if i + 1 < len(ordered) else len(body)
-        value = body[e:next_s].strip()
-        value = re.sub(r"(?m)^\s*=+\s*【?第\s*\d+\s*題結束】?\s*=+\s*$", "", value).strip()
-        found[c] = value
-
-    required = ["建議詳解", "教學重點", "建議教學步驟"]
-    missing = [x for x in required if not found.get(x)]
-    if missing:
-        return found, "缺少必要區塊：" + "、".join(missing)
-    return found, None
-
-
-def _split_batch_question_blocks(text, valid_nos):
-    """Split ChatGPT output using several common question-heading formats."""
-    valid = {str(x) for x in valid_nos}
-    candidates = []
-
-    patterns = [
-        # =====【第1題】===== / 【第1題】
-        r"(?m)^\s*=*\s*【\s*第\s*(\d+)\s*題\s*】\s*=*\s*$",
-        # ## 第1題 / ### 第 1 題
-        r"(?m)^\s*#{1,6}\s*第\s*(\d+)\s*題(?:\s*[:：].*)?\s*$",
-        # **第1題** / **第 1 題：...**
-        r"(?m)^\s*\*\*\s*第\s*(\d+)\s*題(?:\s*[:：][^*]*)?\s*\*\*\s*$",
-        # 第1題 / 第 1 題：
-        r"(?m)^\s*第\s*(\d+)\s*題(?:\s*[:：].*)?\s*$",
-    ]
-
-    for pat in patterns:
-        for m in re.finditer(pat, text):
-            no = m.group(1)
-            if no in valid:
-                # Ignore explicit "第X題結束" markers.
-                line = m.group(0)
-                if "結束" not in line:
-                    candidates.append((m.start(), m.end(), no))
-
-    # Deduplicate headings at same/near position.
-    candidates.sort(key=lambda x: x[0])
-    cleaned = []
-    for item in candidates:
-        if cleaned and abs(item[0] - cleaned[-1][0]) < 5:
-            continue
-        cleaned.append(item)
-
-    blocks = {}
-    for i, (s, e, no) in enumerate(cleaned):
-        next_s = cleaned[i + 1][0] if i + 1 < len(cleaned) else len(text)
-        body = text[e:next_s].strip()
-        # Do not overwrite a longer already-found block.
-        if no not in blocks or len(body) > len(blocks[no]):
-            blocks[no] = body
-    return blocks
+    # If prose accidentally surrounds JSON, keep the outermost JSON object.
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first >= 0 and last > first:
+        raw = raw[first:last + 1]
+    return raw
 
 
 def _parse_batch_chatgpt_result(text, questions):
-    text = (text or "").strip()
-    if not text:
-        return {}, ["尚未貼上 ChatGPT 完整回覆。"]
+    raw = _clean_json_reply(text)
+    if not raw:
+        return {}, ["尚未貼上 ChatGPT 完整 JSON 回覆。"]
+
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        return {}, [f"JSON 格式無法讀取：{type(e).__name__}。請直接貼上 ChatGPT 回傳的完整 JSON，不要自行修改。"]
+
+    if not isinstance(data, dict):
+        return {}, ["最外層必須是 JSON 物件。"]
+
+    items = data.get("questions")
+    if not isinstance(items, list):
+        return {}, ["找不到 questions 陣列。"]
 
     valid = {str(q.source_no): q for q in questions}
-    blocks = _split_batch_question_blocks(text, valid.keys())
+    required_fields = ["三家比較筆記", "建議詳解", "教學重點", "建議教學步驟", "筆記策略"]
     parsed_all = {}
     errors = []
+    seen = set()
 
-    for no, body in blocks.items():
-        sections, err = _extract_flexible_sections(body)
-        if err:
-            errors.append(f"第{no}題：{err}")
+    for idx, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            errors.append(f"questions 第{idx}筆不是物件，已略過。")
             continue
+
+        no = str(item.get("question_no", "")).strip()
+        no = re.sub(r"\D", "", no)
+        if not no:
+            errors.append(f"questions 第{idx}筆缺少 question_no。")
+            continue
+        if no not in valid:
+            errors.append(f"回覆包含非本次選題的第{no}題，已略過。")
+            continue
+        if no in seen:
+            errors.append(f"第{no}題重複出現，僅採用第一筆。")
+            continue
+        seen.add(no)
+
+        missing_fields = []
+        values = {}
+        for field in required_fields:
+            value = item.get(field, "")
+            if value is None:
+                value = ""
+            if not isinstance(value, str):
+                value = str(value)
+            value = value.strip()
+            values[field] = value
+            if not value:
+                missing_fields.append(field)
+
+        if missing_fields:
+            errors.append(f"第{no}題缺少內容：" + "、".join(missing_fields))
+            continue
+
         parsed_all[no] = {
-            "synthesis_notes": sections.get("三家比較筆記", ""),
-            "explanation": sections.get("建議詳解", ""),
-            "teaching_focus": sections.get("教學重點", ""),
-            "teaching": sections.get("建議教學步驟", ""),
-            "note_strategy": sections.get("筆記策略", ""),
+            "synthesis_notes": values["三家比較筆記"],
+            "explanation": values["建議詳解"],
+            "teaching_focus": values["教學重點"],
+            "teaching": values["建議教學步驟"],
+            "note_strategy": values["筆記策略"],
         }
 
-    missing = [str(q.source_no) for q in questions if str(q.source_no) not in parsed_all]
-    if missing:
-        errors.append("尚未成功辨識：" + "、".join(f"第{x}題" for x in missing))
+    missing_questions = [
+        str(q.source_no) for q in questions if str(q.source_no) not in parsed_all
+    ]
+    if missing_questions:
+        errors.append("尚未成功辨識：" + "、".join(f"第{x}題" for x in missing_questions))
 
     return parsed_all, errors
 
@@ -3913,7 +3894,7 @@ with tab3:
 
         batch_questions = _selected_questions_for_batch()
         if batch_questions:
-            st.subheader("🚀 本次選題整批 ChatGPT 整合")
+            st.subheader("🚀 本次選題整批 ChatGPT 整合（JSON穩定版）")
             st.caption(
                 "最省事的流程：一次複製全部已選題目 → 貼給 ChatGPT → "
                 "把 ChatGPT 完整回覆一次貼回來 → 按一次匯入。"
@@ -3935,12 +3916,12 @@ with tab3:
                 )
 
             st.markdown("**步驟 2｜把整份分析包貼到 ChatGPT。**")
-            st.markdown("**步驟 3｜把 ChatGPT 的完整回覆原封不動貼到下面。不要自己拆欄位。**")
+            st.markdown("**步驟 3｜把 ChatGPT 回傳的完整 JSON 原封不動貼到下面。不要自己拆欄位，也不要修改 JSON。**")
             st.text_area(
-                "貼上 ChatGPT 完整回覆",
+                "貼上 ChatGPT 完整 JSON 回覆",
                 height=400,
                 key="batch_chatgpt_result",
-                placeholder="整份貼上即可；程式會自己辨識每一題及五個內容區塊。"
+                placeholder="整份 JSON 直接貼上即可；即使外面有 ```json 程式碼框，v5.9 也會自動去除。"
             )
 
             pasted_batch = st.session_state.get("batch_chatgpt_result", "")
@@ -3958,6 +3939,7 @@ with tab3:
                     if str(q.source_no) not in preview_parsed
                 ]
                 st.markdown("**匯入前預檢**")
+                st.caption("只有題號與五個必要欄位都完整的題目才會列為辨識成功；確認題數後再正式匯入。")
                 st.metric("已辨識題數", f"{len(recognized)} / {len(batch_questions)}")
                 if recognized:
                     st.success("已辨識：" + "、".join(f"第{x}題 ✓" for x in recognized))
