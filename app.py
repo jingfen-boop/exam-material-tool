@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.8 參考資料完整順序解析版"
+APP_VERSION = "Web v6.12.10 語文知識筆記表格固定版"
 
 # -----------------------------
 # Models
@@ -732,7 +732,96 @@ def _parse_note_strategy_table(raw):
             "rows":norm,
             "footer":str(obj.get("footer") or "").strip()}
 
+def _normalize_language_note_table(raw):
+    """Normalize note tables to the current LANGUAGE-KNOWLEDGE purpose.
+
+    The table is for reusable Chinese-language knowledge, not for solving the
+    current multiple-choice item.
+
+    Allowed examples:
+    - 詞語／解釋
+    - 成語／解釋
+    - 標點符號／用法／例句
+    - 修辭／說明／例句
+    - 六書／造字原則／例子
+
+    Old solving-oriented columns such as 選項、文本證據、判斷、是否符合、
+    共同點 are rejected. Old lexical tables such as
+    「語詞／『即』的意思／是否符合」 are automatically migrated to
+    「詞語／解釋」 and the target character is marked with Chinese quotes.
+    """
+    spec = _parse_note_strategy_table(raw)
+    if not spec:
+        return ""
+
+    cols = [str(c or "").strip() for c in spec["columns"]]
+    rows = [list(r) for r in spec["rows"]]
+
+    # Generic migration for old lexical-comparison tables.
+    first_is_lexical = bool(cols) and any(k in cols[0] for k in ("詞語", "語詞", "成語", "字詞"))
+    second_is_definition = len(cols) >= 2 and any(k in cols[1] for k in ("解釋", "意思", "意義", "詞義"))
+    if first_is_lexical and second_is_definition:
+        target = ""
+        m = re.search(r"[「『]([^」』]{1,3})[」』]", cols[1])
+        if m:
+            target = m.group(1)
+
+        new_rows = []
+        for row in rows:
+            term = str(row[0] if len(row) > 0 else "").strip()
+            definition = str(row[1] if len(row) > 1 else "").strip()
+            if target and target in term and f"「{target}」" not in term:
+                # Mark the knowledge focus directly in the word, e.g. 立「即」.
+                term = term.replace(target, f"「{target}」")
+            new_rows.append([term, definition])
+
+        return json.dumps({
+            "title": spec.get("title") or "學生課堂即時筆記如下：",
+            "columns": ["詞語", "解釋"],
+            "rows": new_rows,
+            "footer": "",
+        }, ensure_ascii=False)
+
+    # Tables designed to solve the current question are not language notes.
+    forbidden = ("選項", "證據", "判斷", "是否符合", "共同點", "是否共同",
+                 "原文證據", "文本證據", "比較項目", "特點")
+    if any(any(bad in col for bad in forbidden) for col in cols):
+        return ""
+
+    # Keep genuine language-knowledge tables, but standardize 意義/意思 -> 解釋
+    # for simple lexical two-column notes.
+    if len(cols) == 2 and first_is_lexical:
+        cols[0] = "詞語"
+        cols[1] = "解釋"
+
+    return json.dumps({
+        "title": spec.get("title") or "學生課堂即時筆記如下：",
+        "columns": cols,
+        "rows": rows,
+        "footer": spec.get("footer") or "",
+    }, ensure_ascii=False)
+
+
+def _migrate_question_language_notes(q):
+    """Safely migrate legacy project note tables without touching other fields."""
+    old_raw = getattr(q, "note_strategy_table_json", "") or ""
+    if not old_raw.strip():
+        return
+
+    migrated = _normalize_language_note_table(old_raw)
+    q.note_strategy_table_json = migrated
+
+    # If an old solving-oriented table was rejected, do not leave misleading
+    # solving-strategy prose labeled as a language note.
+    if not migrated:
+        old_note = (getattr(q, "note_strategy", "") or "").strip()
+        solving_terms = ("選項", "證據", "判斷", "共同點", "排除", "本題", "文本")
+        if any(term in old_note for term in solving_terms):
+            q.note_strategy = "本題不另設語文筆記。"
+
+
 def _add_note_strategy_table_to_cell(cell, raw):
+    raw = _normalize_language_note_table(raw)
     spec=_parse_note_strategy_table(raw)
     if not spec:
         return False
@@ -3470,7 +3559,12 @@ def _parse_batch_chatgpt_result(text, questions):
         if note_table_obj in ("", None, False):
             note_table_json = ""
         elif isinstance(note_table_obj, dict):
-            note_table_json = json.dumps(note_table_obj, ensure_ascii=False)
+            raw_note_table = json.dumps(note_table_obj, ensure_ascii=False)
+            note_table_json = _normalize_language_note_table(raw_note_table)
+            if raw_note_table and not note_table_json:
+                errors.append(
+                    f"第{no}題「筆記策略表格」屬於當題解題分析，不符合語文知識筆記規則，已略過表格。"
+                )
         else:
             errors.append(f"第{no}題「筆記策略表格」格式不是物件或 null，已略過表格。")
             note_table_json = ""
@@ -3566,6 +3660,56 @@ def _collect_project_settings():
                 out[k] = v
     return out
 
+def _annual_source_inventory(sources):
+    """Count original annual reference files stored in a project ZIP."""
+    sources = sources or {}
+    counts = {
+        "翰林": 0,
+        "康軒": 0,
+        "南一": 0,
+        "歷年教師版": 0,
+    }
+    for logical_name, item in sources.items():
+        if not isinstance(item, dict):
+            continue
+        if logical_name.startswith("hanlin_"):
+            counts["翰林"] += 1
+        elif logical_name.startswith("kangxuan_"):
+            counts["康軒"] += 1
+        elif logical_name.startswith("nanyi_"):
+            counts["南一"] += 1
+        elif logical_name.startswith("history_"):
+            counts["歷年教師版"] += 1
+    return counts
+
+
+def _has_any_annual_reference_source(sources):
+    inv = _annual_source_inventory(sources)
+    return any(inv.values())
+
+
+def _normalize_legacy_reference_db(refdb, year):
+    """Keep legacy parsed reference data intact while filling newer keys safely."""
+    if not isinstance(refdb, dict):
+        refdb = _empty_reference_db(year)
+
+    refdb.setdefault("format_version", "3.1")
+    refdb.setdefault("year", int(year))
+    refdb.setdefault("publisher", {})
+    for pub in ("翰林", "康軒", "南一"):
+        if not isinstance(refdb["publisher"].get(pub), dict):
+            refdb["publisher"][pub] = {}
+    if not isinstance(refdb.get("history_raw"), dict):
+        refdb["history_raw"] = {}
+    refdb.setdefault("strategy", DEFAULT_STRATEGY_LIBRARY)
+    refdb.setdefault("drafts", {})
+
+    # Do NOT falsely label old already-parsed data as ordered-docx-v2.
+    # We preserve it as legacy parsed content until real original files are available.
+    refdb.setdefault("reference_parser_version", "legacy-preserved")
+    return refdb
+
+
 class _MemoryUpload:
     """Minimal Streamlit UploadedFile-compatible wrapper for stored project sources."""
     def __init__(self, name, data):
@@ -3577,15 +3721,23 @@ class _MemoryUpload:
 
 
 def _rebuild_reference_db_from_project_sources():
-    """Reparse captured annual source files using the CURRENT parser.
+    """Reparse saved ORIGINAL annual reference files using the current parser.
 
-    This lets users upgrade parser versions without re-uploading annual source
-    DOCX/PPTX/PDF files, as long as those originals are already stored in the
-    portable project ZIP.
+    Safety rule:
+    - If a legacy project ZIP only contains the already-parsed reference_db and
+      does NOT contain original Hanlin/Kangxuan/Nanyi/history source files,
+      this function MUST NOT replace the reference_db with empty dictionaries.
+    - If only some original source categories are present, reparse those categories
+      and preserve the old parsed data for categories whose originals are absent.
     """
     sources = st.session_state.get("project_sources", {}) or {}
-    if not sources:
-        return None, ["專案 ZIP 內沒有保存原始年度參考檔，無法自動重解析。"]
+    inv = _annual_source_inventory(sources)
+
+    if not any(inv.values()):
+        return None, [
+            "這份舊專案 ZIP 沒有保存三家出版社／歷年教師版的原始檔；"
+            "已解析的舊參考庫會原樣保留，不會清空。"
+        ]
 
     prefix_map = {
         "hanlin": "翰林",
@@ -3613,28 +3765,61 @@ def _rebuild_reference_db_from_project_sources():
 
     questions = list(st.session_state.get("questions", []) or [])
     expected = len(questions) if questions else None
-    olddb = st.session_state.get("reference_db", _empty_reference_db(st.session_state.get("year", 115)))
 
-    newdb = _empty_reference_db(int(st.session_state.get("year", 115)))
-    newdb["drafts"] = olddb.get("drafts", {})
+    olddb = _normalize_legacy_reference_db(
+        st.session_state.get("reference_db", {}),
+        st.session_state.get("year", 115)
+    )
+
+    # Start from a copy of the old parsed data so missing original categories
+    # can never be erased by a parser migration.
+    newdb = {
+        "format_version": olddb.get("format_version", "3.1"),
+        "reference_parser_version": olddb.get("reference_parser_version", "legacy-preserved"),
+        "year": int(st.session_state.get("year", 115)),
+        "publisher": {
+            pub: dict((olddb.get("publisher", {}) or {}).get(pub, {}) or {})
+            for pub in ("翰林", "康軒", "南一")
+        },
+        "history_raw": dict(olddb.get("history_raw", {}) or {}),
+        "strategy": olddb.get("strategy", DEFAULT_STRATEGY_LIBRARY),
+        "drafts": olddb.get("drafts", {}),
+    }
+
     errors = []
+    reparsed_any = False
 
     for prefix, pub in prefix_map.items():
+        if not grouped[prefix]:
+            continue
         parsed, errs = _parse_publisher_files(grouped[prefix], expected, questions)
-        newdb["publisher"][pub] = parsed
         errors.extend(errs)
+        if parsed:
+            newdb["publisher"][pub] = parsed
+            reparsed_any = True
+        else:
+            errors.append(f"{pub}：新版重解析得到 0 題，已保留舊參考庫，不覆蓋。")
 
-    for uploaded in history:
-        try:
-            newdb["history_raw"][uploaded.name] = _normalize_reference_text(
-                _uploaded_file_text(uploaded)
-            )
-        except Exception as e:
-            errors.append(f"{uploaded.name}：{e}")
+    if history:
+        parsed_history = {}
+        for uploaded in history:
+            try:
+                parsed_history[uploaded.name] = _normalize_reference_text(
+                    _uploaded_file_text(uploaded)
+                )
+            except Exception as e:
+                errors.append(f"{uploaded.name}：{e}")
+        if parsed_history:
+            newdb["history_raw"] = parsed_history
+            reparsed_any = True
+        else:
+            errors.append("歷年教師版：新版重解析沒有取得內容，已保留舊參考庫。")
 
-    newdb["reference_parser_version"] = "ordered-docx-v2"
+    if reparsed_any:
+        newdb["reference_parser_version"] = "ordered-docx-v2-partial-safe"
     st.session_state.reference_db = newdb
     return newdb, errors
+
 
 
 def _build_annual_project_zip():
@@ -3743,13 +3928,17 @@ def _load_annual_project_zip(zip_bytes: bytes):
             qdata["group_crop_pngs"] = []
             q = Question(**qdata)
             _restore_question_images_from_zip(z, q)
+            _migrate_question_language_notes(q)
             questions.append(q)
 
         st.session_state.questions = questions
         st.session_state.year = int(manifest.get("year", 115))
-        st.session_state.reference_db = manifest.get(
+        legacy_refdb = manifest.get(
             "reference_db",
             _empty_reference_db(st.session_state.year)
+        )
+        st.session_state.reference_db = _normalize_legacy_reference_db(
+            legacy_refdb, st.session_state.year
         )
 
         # Restore captured source files for future reparsing/rebuilding.
@@ -3787,6 +3976,8 @@ def _load_annual_project_zip(zip_bytes: bytes):
                 for p in ("翰林", "康軒", "南一")
             },
             "history_files": len(st.session_state.reference_db.get("history_raw", {})),
+            "annual_source_inventory": _annual_source_inventory(restored_sources),
+            "legacy_app_version": manifest.get("app_version", ""),
         }
 
 def _capture_source(logical_name: str, uploaded):
@@ -3860,6 +4051,12 @@ with pc1:
                 f"翰林 {info['publishers']['翰林']}、康軒 {info['publishers']['康軒']}、"
                 f"南一 {info['publishers']['南一']} 題；內部參考 {info['history_files']} 份。"
             )
+            inv = info.get("annual_source_inventory", {})
+            if not any(inv.values()):
+                st.info(
+                    "這是舊版年度專案：已成功保留 ZIP 內既有的出版社／歷年教師版『已解析資料』；"
+                    "但 ZIP 沒有保存這些參考檔的原始 DOCX/PPTX，因此不會顯示重解析按鈕，也不會把舊資料清空。"
+                )
             st.rerun()
         except Exception as e:
             st.error(f"年度專案載入失敗：{e}")
@@ -3990,24 +4187,34 @@ with ref_tab:
 
         st.rerun()
 
-    # v6.12.8 parser migration: reparse source files already saved in the
-    # portable project ZIP, so users do not need to upload them again.
-    if st.session_state.get("project_sources"):
-        current_parser = (st.session_state.get("reference_db", {}) or {}).get("reference_parser_version")
-        if current_parser != "ordered-docx-v2":
+    # v6.12.9 safe parser migration.
+    # A legacy ZIP may contain 42/42/42 + history parsed data but only the
+    # current-year question/answer/rate PDFs as original sources. In that case
+    # NEVER offer a button that would rebuild the reference DB as empty.
+    saved_sources = st.session_state.get("project_sources", {}) or {}
+    annual_inv = _annual_source_inventory(saved_sources)
+    current_ref = _normalize_legacy_reference_db(
+        st.session_state.get("reference_db", {}),
+        st.session_state.get("year", 115)
+    )
+    st.session_state.reference_db = current_ref
+
+    if any(annual_inv.values()):
+        current_parser = current_ref.get("reference_parser_version")
+        if current_parser not in ("ordered-docx-v2", "ordered-docx-v2-partial-safe"):
             st.warning(
-                "目前參考庫是舊解析器建立的；舊版會把 DOCX 的段落與表格分開讀取，"
-                "可能造成出版社詳解或歷年教師版的解析／教學步驟遺失。"
+                "目前參考庫是舊解析器建立的，但這份專案有保存部分／全部原始年度參考檔。"
+                "可用新版順序解析器重建；沒有原始檔的來源會自動保留舊資料，不會被清空。"
             )
         if st.button(
-            "♻️ 用專案內已保存的原始檔重新解析參考庫",
+            "♻️ 用專案內已保存的年度原始檔安全重解析參考庫",
             key="reparse_saved_reference_sources",
             use_container_width=True
         ):
             rebuilt, errs = _rebuild_reference_db_from_project_sources()
             if rebuilt is not None:
                 st.success(
-                    "已用新版順序解析器重新建立參考庫："
+                    "已安全更新參考庫："
                     + "／".join(
                         f"{p}{len(rebuilt.get('publisher', {}).get(p, {}))}題"
                         for p in ("翰林", "康軒", "南一")
@@ -4015,8 +4222,21 @@ with ref_tab:
                     + f"；歷年教師版 {len(rebuilt.get('history_raw', {}))} 份。"
                 )
                 if errs:
-                    st.warning("部分來源仍需確認：\n- " + "\n- ".join(errs))
+                    st.warning("解析提醒：\n- " + "\n- ".join(errs))
                 st.rerun()
+    else:
+        existing_counts = {
+            p: len(current_ref.get("publisher", {}).get(p, {}))
+            for p in ("翰林", "康軒", "南一")
+        }
+        existing_history = len(current_ref.get("history_raw", {}))
+        if any(existing_counts.values()) or existing_history:
+            st.info(
+                "此舊專案 ZIP 沒有保存三家出版社／歷年教師版的原始檔，"
+                f"但已保存既有參考庫：翰林 {existing_counts['翰林']} 題、"
+                f"康軒 {existing_counts['康軒']} 題、南一 {existing_counts['南一']} 題、"
+                f"歷年教師版 {existing_history} 份。程式會直接沿用，絕不因改版清空。"
+            )
 
     st.divider()
 
@@ -4121,8 +4341,18 @@ with ref_tab:
                     "若專案 ZIP 內有保存原始檔，可使用上方「用專案內已保存的原始檔重新解析參考庫」；"
                     "若只有這份年度 JSON，則需要重新上傳一次原始出版社／歷年教師版檔案。"
                 )
+            db = _normalize_legacy_reference_db(
+                db, db.get("year", st.session_state.year)
+            )
             st.session_state.reference_db = db
-            st.success(f"已載入 {db.get('year', '未標示年度')} 年度參考包。")
+            st.success(
+                f"已載入 {db.get('year', '未標示年度')} 年度參考包："
+                + "／".join(
+                    f"{p}{len(db.get('publisher', {}).get(p, {}))}題"
+                    for p in ("翰林", "康軒", "南一")
+                )
+                + f"；歷年教師版 {len(db.get('history_raw', {}))} 份。"
+            )
             st.rerun()
         except Exception as e:
             st.error(f"載入失敗：{e}")
@@ -5195,7 +5425,8 @@ with tab3:
                     key=f"note_table_{qno}",
                     placeholder='{"title":"學生課堂即時筆記如下：","columns":["詞語","解釋"],"rows":[["立「即」","立刻、當下"]],"footer":""}'
                 )
-                spec = _parse_note_strategy_table(q.note_strategy_table_json)
+                normalized_note_table = _normalize_language_note_table(q.note_strategy_table_json)
+                spec = _parse_note_strategy_table(normalized_note_table)
                 if spec:
                     st.markdown("**表格預覽**")
                     st.dataframe([dict(zip(spec["columns"], row)) for row in spec["rows"]],
@@ -5203,7 +5434,10 @@ with tab3:
                     if spec["footer"]:
                         st.caption(spec["footer"])
                 elif q.note_strategy_table_json.strip():
-                    st.warning("表格 JSON 格式尚未正確，Word 會暫時略過此表格。")
+                    st.warning(
+                        "這個表格不是有效的語文知識筆記格式，或仍含「選項／證據／判斷／共同點」等當題解題欄位；"
+                        "Word 會略過。字詞類請優先使用「詞語／解釋」兩欄。"
+                    )
 
             q.workbench_reviewed = st.checkbox(
                 "本題詳解與教學步驟已人工確認",
