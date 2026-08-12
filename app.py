@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12 題號括弧與版面一致性修正版"
+APP_VERSION = "Web v6.12.1 僅修圖像題括弧字級版"
 
 # -----------------------------
 # Models
@@ -586,15 +586,7 @@ def set_cell_shading(cell, fill):
 
 def set_eastasia(run, font="標楷體"):
     run.font.name = font
-    rPr = run._element.get_or_add_rPr()
-    rFonts = rPr.rFonts
-    if rFonts is None:
-        rFonts = OxmlElement("w:rFonts")
-        rPr.insert(0, rFonts)
-    # Force every script bucket to the same typeface. This prevents punctuation,
-    # parentheses and Arabic numerals from being rendered by a smaller fallback font.
-    for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
-        rFonts.set(qn(f"w:{attr}"), font)
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
 
 def _set_run_word_style(run, font="標楷體", size=13, color=None, bold=None):
     set_eastasia(run, font)
@@ -837,9 +829,10 @@ def add_header(doc, title):
 
 def add_question(doc, q: Question, display_no: int, year: int, teacher=False, use_crop=False):
     p = doc.add_paragraph()
-    _set_body_paragraph_format(p, before=0, after=0)
-    p.paragraph_format.keep_with_next = True
-    _add_answer_prefix(p, q, display_no, teacher)
+    r = p.add_run(f"（{' ' + _clean_word_text(q.answer) + ' ' if teacher and q.answer else '   '}）{display_no}. ")
+    set_eastasia(r)
+    if teacher and q.answer:
+        r.font.color.rgb = RGBColor(255,0,0)
 
     if use_crop and q.crop_png:
         p2 = doc.add_paragraph()
@@ -952,8 +945,8 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
         pno.paragraph_format.space_after = Pt(2)
         r = pno.add_run(f"{display_no}.")
         set_eastasia(r)
-        r.bold = False
-        r.font.size = Pt(13)
+        r.bold = True
+        r.font.size = Pt(11)
 
     if q.crop_png:
         p = doc.add_paragraph()
@@ -1023,7 +1016,7 @@ def _add_editable_options(doc, q: Question, two_columns=False):
             p = cell.paragraphs[0]
             r = p.add_run(f"({key}) {_clean_word_text(q.options.get(key, ''))}")
             set_eastasia(r)
-            r.font.size = Pt(13)
+            r.font.size = Pt(10.5)
         # Remove table borders for exam-like appearance.
         tblPr = table._tbl.tblPr
         borders = OxmlElement("w:tblBorders")
@@ -1039,7 +1032,7 @@ def _add_editable_options(doc, q: Question, two_columns=False):
             p.paragraph_format.space_after = Pt(1)
             r = p.add_run(f"({key}) {_clean_word_text(q.options.get(key, ''))}")
             set_eastasia(r)
-            r.font.size = Pt(13)
+            r.font.size = Pt(10.5)
 
 def _add_first_image_to_cell(cell, q: Question, width_cm=6.3):
     if not q.include_image or not q.image_pngs:
@@ -1073,17 +1066,18 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
     Full-image mode for complex source questions.
     Editable: answer bracket + new question number.
     Visual: original question body as one image, with the old number gutter removed.
-
-    v6.12: answer bracket / answer letter / question number use the SAME
-    13 pt Kai-style formatter as ordinary editable questions.
     """
     p = doc.add_paragraph()
     p.paragraph_format.left_indent = Cm(0)
     p.paragraph_format.first_line_indent = Cm(0)
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(0)
-    p.paragraph_format.keep_with_next = True
-    _add_answer_prefix(p, q, display_no, teacher)
+    answer_text = q.answer if teacher and q.answer else "　"
+    r = p.add_run(f"（{answer_text}）{display_no}.")
+    set_eastasia(r)
+    r.font.size = Pt(13)
+    if teacher and q.answer:
+        r.font.color.rgb = RGBColor(255,0,0)
 
     data = q.body_crop_png or q.crop_png
     if data:
@@ -1373,7 +1367,6 @@ def _add_group_header_and_material(doc, q: Question, members, display_numbers):
     heading=_group_heading_template(q,members,display_numbers)
     p=doc.add_paragraph()
     _set_body_paragraph_format(p,before=2,after=2)
-    p.paragraph_format.keep_with_next = True
     r=p.add_run(heading)
     _set_run_word_style(r,font="標楷體",size=13)
 
@@ -1438,7 +1431,6 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
         c0, c1 = table.cell(0,0), table.cell(0,1)
         p = c0.paragraphs[0]
         _set_body_paragraph_format(p, after=0)
-        p.paragraph_format.keep_with_next = True
         _add_answer_prefix(p, q, display_no, teacher)
         r = p.add_run(stem_text)
         _set_run_word_style(r, size=13)
@@ -1456,7 +1448,6 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
     else:
         p = doc.add_paragraph()
         _set_body_paragraph_format(p, before=1, after=0)
-        p.paragraph_format.keep_with_next = True
         _add_answer_prefix(p, q, display_no, teacher)
         r = p.add_run(stem_text)
         _set_run_word_style(r, size=13)
