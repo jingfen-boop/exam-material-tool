@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.5 詳解初稿按鈕狀態修正版"
+APP_VERSION = "Web v5.6 ChatGPT 分析包＋整合稿匯入工作流"
 
 # -----------------------------
 # Models
@@ -2491,6 +2491,137 @@ def _build_source_grounded_draft(refdb, q):
         "synthesis_notes": synthesis,
     }, None
 
+
+# -----------------------------
+# v5.6 ChatGPT analysis-package workflow
+# -----------------------------
+def _build_chatgpt_analysis_package(refdb, q):
+    """Build one self-contained, source-grounded prompt package for this question."""
+    pubs = _publisher_blocks_for_question(refdb, q.source_no)
+    strategy = _strategy_for_category(refdb, q.category or "其他")
+    hist = _history_examples_for_category(refdb, q.category) if q.category else []
+
+    option_lines = "\n".join(
+        f"({k}) {v}" for k, v in (q.options or {}).items() if str(v or "").strip()
+    )
+
+    pub_text = []
+    for pub in ("翰林", "康軒", "南一"):
+        block = pubs.get(pub, "")
+        pub_text.append(
+            f"【{pub}詳解】\n{block if block else '（目前未辨識到本題資料）'}"
+        )
+
+    hist_text = []
+    for i, (source, excerpt) in enumerate(hist[:8], 1):
+        hist_text.append(f"【歷年參考{i}｜{source}】\n{excerpt}")
+    if not hist_text:
+        hist_text.append("（目前沒有依能力類型找到歷年摘錄）")
+
+    package = f"""你現在要協助製作「國中教育會考國文教師版」教材。
+請只根據下方提供的本題資料、三家出版社詳解，以及本團隊歷年寫法來整合。
+不要自行補入來源未支持的專有事實；若來源不足，請明確標示需要人工確認。
+
+【今年題目】
+原題號：{q.source_no}
+能力類型：{q.category or '尚未設定'}
+官方答案：{q.answer or '—'}
+通過率：{q.pass_rate if q.pass_rate is not None else '—'}
+
+【閱讀／共用材料】
+{q.material or '（無）'}
+
+【題幹】
+{q.text or '（未辨識）'}
+
+【選項】
+{option_lines or '（無）'}
+
+【三家出版社原始詳解】
+{chr(10).join(pub_text)}
+
+【本團隊歷年同能力類型參考】
+{chr(10).join(hist_text)}
+
+【本團隊此能力類型教學框架】
+教學重點：
+{strategy.get('教學重點', '')}
+
+教學步驟：
+{strategy.get('教學步驟', '')}
+
+筆記策略：
+{strategy.get('筆記策略', '')}
+
+【你的任務】
+1. 先比較三家出版社：共同核心、互補之處、是否有說法差異。
+2. 參照本團隊歷年教師版的詳略、語氣、結構與教學步驟寫法。
+3. 針對「今年這一題」重新撰寫，不要只是拼接出版社原文。
+4. 詳解要說清楚正確答案成立的依據；適合時補充錯誤選項為何不成立。
+5. 教學步驟必須能真正帶教師操作，不要只寫「讀題、找線索、排除」等過度簡略句。
+6. 內容以可直接放入教師版為目標，但仍保留人工審核空間。
+7. 請嚴格使用以下五個標題輸出，不要改標題名稱：
+
+【三家比較筆記】
+（內容）
+
+【建議詳解】
+（內容）
+
+【教學重點】
+（內容）
+
+【建議教學步驟】
+（內容）
+
+【筆記策略】
+（內容）
+"""
+    return package.strip()
+
+
+def _parse_chatgpt_integrated_result(text):
+    """Parse the fixed five-section format returned by ChatGPT."""
+    text = (text or "").strip()
+    if not text:
+        return None, "尚未貼上整合結果。"
+
+    headings = [
+        "三家比較筆記",
+        "建議詳解",
+        "教學重點",
+        "建議教學步驟",
+        "筆記策略",
+    ]
+
+    found = {}
+    for idx, heading in enumerate(headings):
+        pattern = re.compile(rf"【\s*{re.escape(heading)}\s*】")
+        m = pattern.search(text)
+        if not m:
+            continue
+        end = len(text)
+        for next_heading in headings[idx+1:]:
+            nm = re.search(rf"【\s*{re.escape(next_heading)}\s*】", text[m.end():])
+            if nm:
+                end = m.end() + nm.start()
+                break
+        found[heading] = text[m.end():end].strip()
+
+    required = ["建議詳解", "教學重點", "建議教學步驟"]
+    missing = [h for h in required if not found.get(h)]
+    if missing:
+        return None, "缺少必要區塊：" + "、".join(missing)
+
+    return {
+        "synthesis_notes": found.get("三家比較筆記", ""),
+        "explanation": found.get("建議詳解", ""),
+        "teaching_focus": found.get("教學重點", ""),
+        "teaching": found.get("建議教學步驟", ""),
+        "note_strategy": found.get("筆記策略", ""),
+    }, None
+
+
 # -----------------------------
 # v5.1 Annual project persistence
 # -----------------------------
@@ -3666,7 +3797,75 @@ with tab3:
                             label_visibility="collapsed"
                         )
 
-            st.markdown("### 三、三家比較筆記")
+            st.markdown("### 三、交給 ChatGPT 深度整合（免 API）")
+            st.caption(
+                "這裡會把「今年題目＋三家出版社＋本團隊歷年同能力類型寫法＋教學框架」"
+                "整理成一份完整分析包。你可以直接複製到目前的 ChatGPT 對話，"
+                "讓 ChatGPT 依指定格式產生更接近可直接使用的詳解與教學步驟。"
+            )
+
+            analysis_package = _build_chatgpt_analysis_package(refdb, q)
+            with st.expander("📋 查看／複製本題 ChatGPT 分析包", expanded=False):
+                st.text_area(
+                    "本題分析包",
+                    value=analysis_package,
+                    height=420,
+                    key=f"chatgpt_package_{qno}",
+                    help="全選後複製到 ChatGPT 即可。"
+                )
+                st.download_button(
+                    "⬇️ 下載本題分析包 TXT",
+                    data=analysis_package.encode("utf-8"),
+                    file_name=f"{int(st.session_state.year)}_第{qno}題_ChatGPT分析包.txt",
+                    mime="text/plain",
+                    key=f"download_chatgpt_package_{qno}",
+                    use_container_width=True
+                )
+
+            st.markdown("**把 ChatGPT 回傳的五段整合稿貼回來：**")
+            pasted_result = st.text_area(
+                "ChatGPT 整合結果",
+                height=300,
+                key=f"chatgpt_result_{qno}",
+                placeholder="請貼上包含【三家比較筆記】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】的完整結果。"
+            )
+
+            def _import_chatgpt_result_callback():
+                parsed, err = _parse_chatgpt_integrated_result(
+                    st.session_state.get(f"chatgpt_result_{qno}", "")
+                )
+                if err:
+                    st.session_state[f"chatgpt_import_error_{qno}"] = err
+                    return
+
+                st.session_state[f"syn_{qno}"] = parsed["synthesis_notes"]
+                st.session_state[f"exp_{qno}"] = parsed["explanation"]
+                st.session_state[f"focus_{qno}"] = parsed["teaching_focus"]
+                st.session_state[f"teach_{qno}"] = parsed["teaching"]
+                st.session_state[f"note_{qno}"] = parsed["note_strategy"]
+
+                q.synthesis_notes = parsed["synthesis_notes"]
+                q.explanation = parsed["explanation"]
+                q.teaching_focus = parsed["teaching_focus"]
+                q.teaching = parsed["teaching"]
+                q.note_strategy = parsed["note_strategy"]
+                st.session_state[f"chatgpt_import_success_{qno}"] = True
+
+            st.button(
+                "⬇️ 匯入 ChatGPT 整合稿到本題欄位",
+                key=f"import_chatgpt_result_{qno}",
+                on_click=_import_chatgpt_result_callback,
+                use_container_width=True,
+                type="primary"
+            )
+
+            import_err = st.session_state.pop(f"chatgpt_import_error_{qno}", None)
+            if import_err:
+                st.error(f"匯入失敗：{import_err}")
+            if st.session_state.pop(f"chatgpt_import_success_{qno}", False):
+                st.success("已把 ChatGPT 整合稿拆入本題五個欄位，可在下方繼續人工修改。")
+
+            st.markdown("### 四、三家比較筆記")
             if f"syn_{qno}" not in st.session_state:
                 st.session_state[f"syn_{qno}"] = q.synthesis_notes
             q.synthesis_notes = st.text_area(
@@ -3675,7 +3874,7 @@ with tab3:
                 key=f"syn_{qno}"
             )
 
-            st.markdown("### 四、本次整合建議稿（人工可修改）")
+            st.markdown("### 五、本次整合建議稿（人工可修改）")
             st.caption(
                 "可先按「✨ 產生本題整合建議初稿」自動帶入可修改內容。"
                 "初稿只使用本年度已解析的出版社資料與本團隊教學框架，不會把單一出版社直接當成最終答案；"
@@ -3725,7 +3924,7 @@ with tab3:
             draft_c1, draft_c2 = st.columns(2)
             with draft_c1:
                 st.button(
-                    "✨ 產生本題整合建議初稿",
+                    "⚙️ 產生規則式整合初稿（備用）",
                     key=f"build_integrated_draft_{qno}",
                     use_container_width=True,
                     help="依本年度已解析的三家出版社詳解＋本團隊能力類型教學框架產生可修改初稿。此功能不使用外部 AI/API。",
