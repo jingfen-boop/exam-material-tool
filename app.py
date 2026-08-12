@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.4 題組選題同步根本修正"
+APP_VERSION = "Web v5.5 詳解初稿按鈕狀態修正版"
 
 # -----------------------------
 # Models
@@ -3701,44 +3701,58 @@ with tab3:
                 if key not in st.session_state:
                     st.session_state[key] = value
 
+            def _generate_integrated_draft_callback():
+                draft, err = _build_source_grounded_draft(refdb, q)
+                if err:
+                    st.session_state[f"draft_error_{qno}"] = err
+                    return
+
+                # Callback runs BEFORE the next script rerun, so Streamlit allows
+                # updating widget-backed session keys such as syn_{qno}.
+                st.session_state[f"exp_{qno}"] = draft["explanation"]
+                st.session_state[f"focus_{qno}"] = draft["teaching_focus"]
+                st.session_state[f"teach_{qno}"] = draft["teaching"]
+                st.session_state[f"note_{qno}"] = draft["note_strategy"]
+                st.session_state[f"syn_{qno}"] = draft["synthesis_notes"]
+
+                q.explanation = draft["explanation"]
+                q.teaching_focus = draft["teaching_focus"]
+                q.teaching = draft["teaching"]
+                q.note_strategy = draft["note_strategy"]
+                q.synthesis_notes = draft["synthesis_notes"]
+                st.session_state[f"draft_success_{qno}"] = True
+
             draft_c1, draft_c2 = st.columns(2)
             with draft_c1:
-                if st.button(
+                st.button(
                     "✨ 產生本題整合建議初稿",
                     key=f"build_integrated_draft_{qno}",
                     use_container_width=True,
-                    help="依本年度已解析的三家出版社詳解＋本團隊能力類型教學框架產生可修改初稿。此功能不使用外部 AI/API。"
-                ):
-                    draft, err = _build_source_grounded_draft(refdb, q)
-                    if err:
-                        st.error(err)
-                    else:
-                        st.session_state[f"exp_{qno}"] = draft["explanation"]
-                        st.session_state[f"focus_{qno}"] = draft["teaching_focus"]
-                        st.session_state[f"teach_{qno}"] = draft["teaching"]
-                        st.session_state[f"note_{qno}"] = draft["note_strategy"]
-                        st.session_state[f"syn_{qno}"] = draft["synthesis_notes"]
-                        q.explanation = draft["explanation"]
-                        q.teaching_focus = draft["teaching_focus"]
-                        q.teaching = draft["teaching"]
-                        q.note_strategy = draft["note_strategy"]
-                        q.synthesis_notes = draft["synthesis_notes"]
-                        st.rerun()
+                    help="依本年度已解析的三家出版社詳解＋本團隊能力類型教學框架產生可修改初稿。此功能不使用外部 AI/API。",
+                    on_click=_generate_integrated_draft_callback
+                )
+
+                if st.session_state.pop(f"draft_error_{qno}", None):
+                    st.error("無法產生初稿：本題目前缺少可用的出版社來源資料。")
+                if st.session_state.pop(f"draft_success_{qno}", False):
+                    st.success("已產生本題整合建議初稿，可直接在下方修改。")
+
+            def _apply_strategy_callback():
+                strategy = _strategy_for_category(refdb, q.category or "其他")
+                st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
+                st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
+                st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
+                q.teaching_focus = st.session_state[f"focus_{qno}"]
+                q.teaching = st.session_state[f"teach_{qno}"]
+                q.note_strategy = st.session_state[f"note_{qno}"]
 
             with draft_c2:
-                if st.button(
+                st.button(
                     "套用本能力類型的詳細教學框架",
                     key=f"apply_strategy_{qno}",
-                    use_container_width=True
-                ):
-                    strategy = _strategy_for_category(refdb, q.category or "其他")
-                    st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
-                    st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
-                    st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
-                    q.teaching_focus = st.session_state[f"focus_{qno}"]
-                    q.teaching = st.session_state[f"teach_{qno}"]
-                    q.note_strategy = st.session_state[f"note_{qno}"]
-                    st.rerun()
+                    use_container_width=True,
+                    on_click=_apply_strategy_callback
+                )
 
             q.explanation = st.text_area("建議詳解", height=300, key=f"exp_{qno}")
             q.teaching_focus = st.text_area("教學重點", height=100, key=f"focus_{qno}")
