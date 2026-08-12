@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.1 僅修圖像題括弧字級版"
+APP_VERSION = "Web v6.12.2 圖像題題號真正一致版"
 
 # -----------------------------
 # Models
@@ -795,18 +795,39 @@ def _add_legacy_teacher_box(doc, q: Question):
     return table
 
 
+def _force_prefix_font(run, font="標楷體", size=13):
+    """Force all Word font slots for answer brackets / letter / question number.
+
+    This is intentionally limited to the question prefix so it cannot disturb
+    the pagination or body layout of the rest of the document.
+    """
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.rFonts
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.insert(0, rFonts)
+    for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
+        rFonts.set(qn(f"w:{attr}"), font)
+    run.font.name = font
+    run.font.size = Pt(size)
+
+
 def _add_answer_prefix(p, q, display_no, teacher):
     """Historical look: black parentheses/number, red answer letter only."""
     r = p.add_run("（ ")
     _set_run_word_style(r, size=13)
+    _force_prefix_font(r, size=13)
     if teacher and q.answer:
         r = p.add_run(_clean_word_text(q.answer))
         _set_run_word_style(r, size=13, color=RGBColor(255, 0, 0))
+        _force_prefix_font(r, size=13)
     else:
         r = p.add_run("  ")
         _set_run_word_style(r, size=13)
+        _force_prefix_font(r, size=13)
     r = p.add_run(f" ）{display_no}. ")
     _set_run_word_style(r, size=13)
+    _force_prefix_font(r, size=13)
 
 
 def add_header(doc, title):
@@ -1072,12 +1093,10 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
     p.paragraph_format.first_line_indent = Cm(0)
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(0)
-    answer_text = q.answer if teacher and q.answer else "　"
-    r = p.add_run(f"（{answer_text}）{display_no}.")
-    set_eastasia(r)
-    r.font.size = Pt(13)
-    if teacher and q.answer:
-        r.font.color.rgb = RGBColor(255,0,0)
+    # Only this prefix is kept with its image. This prevents a lone "(D) 3."
+    # at the bottom of a page without changing the rest of the document flow.
+    p.paragraph_format.keep_with_next = True
+    _add_answer_prefix(p, q, display_no, teacher)
 
     data = q.body_crop_png or q.crop_png
     if data:
