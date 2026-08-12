@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.8 閱讀題組原題幹版"
+APP_VERSION = "Web v6.9 筆記策略表格實作版"
 
 # -----------------------------
 # Models
@@ -43,6 +43,7 @@ class Question:
     teaching_focus: str = ""
     teaching: str = ""
     note_strategy: str = ""
+    note_strategy_table_json: str = ""
     workbench_reviewed: bool = False
     group_id: str = ""
     group_intro: str = ""
@@ -700,6 +701,61 @@ def _add_red_multiline(cell, text):
         _add_red_paragraph(cell, line)
 
 
+
+def _parse_note_strategy_table(raw):
+    if not raw:
+        return None
+    try:
+        obj = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    cols=obj.get("columns") or []
+    rows=obj.get("rows") or []
+    if not isinstance(cols,list) or len(cols)<2:
+        return None
+    norm=[]
+    for row in rows:
+        if not isinstance(row,list):
+            continue
+        vals=[str(x or "") for x in row[:len(cols)]]
+        vals += [""]*(len(cols)-len(vals))
+        norm.append(vals)
+    return {"title":str(obj.get("title") or "").strip(),
+            "columns":[str(x or "") for x in cols],
+            "rows":norm,
+            "footer":str(obj.get("footer") or "").strip()}
+
+def _add_note_strategy_table_to_cell(cell, raw):
+    spec=_parse_note_strategy_table(raw)
+    if not spec:
+        return False
+    if spec["title"]:
+        _add_red_paragraph(cell,spec["title"])
+    tbl=cell.add_table(rows=1,cols=len(spec["columns"]))
+    tbl.style="Table Grid"
+    tbl.alignment=WD_TABLE_ALIGNMENT.CENTER
+    tbl.autofit=True
+    for j,val in enumerate(spec["columns"]):
+        c=tbl.cell(0,j); c.text=""
+        p=c.paragraphs[0]; p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+        _set_body_paragraph_format(p,after=0)
+        r=p.add_run(_clean_word_text(val))
+        _set_run_word_style(r,font="標楷體",size=11,color=RGBColor(255,0,0))
+        tcPr=c._tc.get_or_add_tcPr()
+        shd=OxmlElement("w:shd"); shd.set(qn("w:fill"),"D9E2F3"); tcPr.append(shd)
+    for row in spec["rows"]:
+        cells=tbl.add_row().cells
+        for j,val in enumerate(row):
+            cells[j].text=""
+            p=cells[j].paragraphs[0]; _set_body_paragraph_format(p,after=0)
+            r=p.add_run(_clean_word_text(val))
+            _set_run_word_style(r,font="標楷體",size=11,color=RGBColor(255,0,0))
+    if spec["footer"]:
+        _add_red_paragraph(cell,spec["footer"])
+    return True
+
 def _add_legacy_teacher_box(doc, q: Question):
     """One thin black box per question, matching the historical teacher edition."""
     table = doc.add_table(rows=1, cols=1)
@@ -726,10 +782,12 @@ def _add_legacy_teacher_box(doc, q: Question):
     _add_red_paragraph(cell, "【教學步驟】：", label=True)
     _add_red_multiline(cell, q.teaching or "（待補）")
 
-    if (q.note_strategy or "").strip():
+    if (q.note_strategy or "").strip() or (q.note_strategy_table_json or "").strip():
         _add_red_paragraph(cell, "", label=False)
         _add_red_paragraph(cell, "【筆記策略】：", label=True)
-        _add_red_multiline(cell, q.note_strategy)
+        if (q.note_strategy or "").strip():
+            _add_red_multiline(cell, q.note_strategy)
+        _add_note_strategy_table_to_cell(cell, q.note_strategy_table_json)
 
     return table
 
@@ -1211,39 +1269,6 @@ def _wrap_body_elements_in_keep_table(doc, start_index: int):
     else:
         body.append(tbl)
 
-def _add_official_group_intro(doc, q: Question) -> bool:
-    """Insert the original PDF reading-group heading + shared passage once.
-
-    Priority is the original PDF crop because it preserves the exact 会考 layout,
-    including 「請閱讀……並回答24～25題」, poem/article line breaks, tables,
-    punctuation and unusual typography. Returns True when a crop was inserted.
-    """
-    crops = list(q.group_crop_pngs or [])
-    if not crops:
-        return False
-
-    inserted = False
-    for data in crops:
-        if not data:
-            continue
-        try:
-            im = Image.open(io.BytesIO(data))
-            w, h = im.size
-            # Use the full printable width but never enlarge a very narrow crop
-            # excessively. Aspect ratio is always preserved.
-            target_w = 16.0 if w >= 700 else 14.8
-            p = doc.add_paragraph()
-            p.paragraph_format.left_indent = Cm(0)
-            p.paragraph_format.right_indent = Cm(0)
-            p.paragraph_format.space_before = Pt(1)
-            p.paragraph_format.space_after = Pt(2)
-            p.add_run().add_picture(io.BytesIO(data), width=Cm(target_w))
-            inserted = True
-        except Exception:
-            continue
-    return inserted
-
-
 def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
                                show_material=True, year=None):
     material_text = _clean_word_text(q.material)
@@ -1506,21 +1531,7 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
         else:
             show_material = False
 
-        # Reading groups must begin with the COMPLETE official group stem/material
-        # above the first child question. Prefer the original PDF crop so the
-        # heading, line breaks and typography match the actual 会考 source.
-        # If no crop is available (e.g. an older saved project), fall back to the
-        # editable extracted group_intro/material text below.
-        used_official_group_crop = False
-        if group_key and show_material:
-            used_official_group_crop = _add_official_group_intro(doc, q)
-
         if mode == "整題圖像":
-            if group_key and show_material and not used_official_group_crop and material_key:
-                pmat = doc.add_paragraph()
-                _set_body_paragraph_format(pmat, before=1, after=2)
-                rmat = pmat.add_run(material_key)
-                _set_run_word_style(rmat, size=13)
             add_full_image_exam_question(
                 doc, q, i, teacher=teacher, year=year
             )
@@ -1531,7 +1542,7 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
             start_index = list(body).index(sectPr) if sectPr is not None else len(list(body))
             add_editable_exam_question(
                 doc, q, i, teacher=teacher,
-                show_material=(show_material and not used_official_group_crop), year=year
+                show_material=show_material, year=year
             )
             if keep_short:
                 _wrap_body_elements_in_keep_table(doc, start_index)
@@ -2843,14 +2854,29 @@ def _build_chatgpt_analysis_package(refdb, q):
 若直接引用教育部釋義，不可任意改寫；若為教材可讀性而轉述，標示「依教育部辭典義項整理」。
 本題若完全無需字詞解釋，字詞查證紀錄填「本題無需字詞查證」。
 
+【詳解文風的強制規則】
+「建議詳解」的寫法以【本團隊歷年同能力類型參考】為最高優先；三家出版社只用來交叉確認答案依據、補足資訊，不可作為句型或段落模板。
+1. 必須重新組織論證，不得沿用任一家出版社的敘述順序、句型骨架或大段措辭。
+2. 除題幹／選項中不得不引用的原文外，避免與任一家出版社出現連續且具辨識度的相同說明語句。
+3. 優先模仿本團隊歷年詳解的結構：
+   - 直接進入文本證據或選項判斷，不以「答案(X)」作為開頭。
+   - 閱讀題常用「由『……』可知……」建立「文本證據 → 判斷」。
+   - 錯誤選項以「文中並未提及……」「由……可知……並非……」「此選項……」等方式簡潔辨析。
+   - 字詞題可逐項列出詞義／用法與正誤。
+   - 結尾統一使用「故答案應選(X)。」。
+4. 詳解以足以支持作答為原則，不額外加入出版社教材對應、課次、投影片或與作答無關的延伸知識。
+5. 字詞查證的來源與查證過程主要放在「字詞查證紀錄」；「建議詳解」維持本團隊教材語氣，除非辨義本身需要，否則不在正文反覆寫出辭典全名。
+6. 完稿前自行做一次「出版社相似度檢查」：若整段明顯像翰林、康軒或南一其中一家，必須改寫為本團隊歷年常見的簡潔、逐項判讀式寫法，再輸出。
+7. 「筆記策略」不是每題都一定要有表格。若本題適合字詞比較、概念分類、雙文本比較、選項證據對照或規則整理，除筆記策略文字外，必須提供可直接放入教師版的「筆記策略表格」，欄名與各列內容都要具體寫完；若不適合，表格填 null，不要硬做。表格設計優先參考本團隊歷年「詞語／意義」、「標點符號／用法／造句（或例句）」、「六書／造字原則／例子」等形式。
+
 【你的任務】
 1. 先比較三家出版社：共同核心、互補之處、是否有說法差異。
-2. 參照本團隊歷年教師版的詳略、語氣、結構與教學步驟寫法。
-3. 針對「今年這一題」重新撰寫，不要只是拼接出版社原文。
+2. 嚴格參照本團隊歷年教師版的詳略、語氣、結構與教學步驟寫法；若與出版社文風衝突，以本團隊歷年寫法為準。
+3. 針對「今年這一題」重新撰寫，不要拼接或近似改寫出版社原文。
 4. 詳解要說清楚正確答案成立的依據；適合時補充錯誤選項為何不成立。
 5. 教學步驟必須能真正帶教師操作，不要只寫「讀題、找線索、排除」等過度簡略句。
 6. 內容以可直接放入教師版為目標，但仍保留人工審核空間。
-7. 請嚴格使用以下五個標題輸出，不要改標題名稱：
+7. 請嚴格使用以下六個標題輸出，不要改標題名稱：
 
 【三家比較筆記】
 （內容）
@@ -2948,8 +2974,13 @@ def _build_batch_chatgpt_package(refdb, questions):
                 "建議詳解": "完整內容",
                 "教學重點": "完整內容",
                 "建議教學步驟": "完整內容",
-                "筆記策略": "完整內容"
-            }
+                "筆記策略": "完整內容；若不適合表格筆記可明記",
+                "筆記策略表格": {
+                    "title": "學生課堂即時筆記如下：",
+                    "columns": ["欄位1", "欄位2"],
+                    "rows": [["內容1", "內容2"]],
+                    "footer": "★可選填的筆記效益或學生任務"
+                }            }
         ]
     }
 
@@ -2960,11 +2991,16 @@ def _build_batch_chatgpt_package(refdb, questions):
 
 內容要求：
 1. 每一題都必須完成，不可漏題，也不可把題組中的不同子題合併成同一題。
-2. 參照本團隊歷年教師版的詳略、語氣、結構與教學步驟寫法。
-3. 「建議詳解」必須說清楚答案依據；適合時補充錯誤選項辨析。
-4. 「建議教學步驟」必須具體、連貫、可操作，不可只寫「讀題、找線索、排除」。
-5. 不要只是拼接三家出版社原文，要針對今年題目重新整合撰寫。
-6. 若資料不足，請在對應欄位明確寫「需人工確認」，不要杜撰。
+2. 「建議詳解」的文風以分析包中的【本團隊歷年同能力類型參考】為最高優先；三家出版社僅作答案依據與資訊交叉確認，不得以任一家出版社作為句型或段落模板。
+3. 必須重新組織每題詳解，不得沿用任一家出版社的敘述順序、句型骨架或大段措辭；除題幹／選項必要引文外，避免出現具辨識度的連續相同說明語句。
+4. 詳解優先採本團隊歷年常見寫法：直接進入文本證據或選項判斷；閱讀題以「由『……』可知……」建立證據與判斷；錯誤選項簡潔說明「文中並未提及……」或指出與文本何處不符；字詞題可逐項辨義；結尾統一「故答案應選(X)。」。不要以「答案(X)。」起筆。
+5. 字詞查證來源與查證過程主要放在「字詞查證紀錄」；「建議詳解」維持本團隊教材語氣，除非辨義需要，不反覆寫辭典全名。
+6. 每題完成後自行檢查：若整段明顯近似翰林、康軒或南一其中一家，必須再次改寫，使結構與語氣回到本團隊歷年詳解風格。
+7. 「建議詳解」必須說清楚答案依據；適合時補充錯誤選項辨析，但不加入與作答無關的教材課次、投影片或延伸知識。
+8. 「建議教學步驟」必須具體、連貫、可操作，不可只寫「讀題、找線索、排除」。
+9. 若資料不足，請在對應欄位明確寫「需人工確認」，不要杜撰。
+10. 「筆記策略」須先判斷是否適合表格化。若適合，必須同時提供「筆記策略表格」物件，直接寫出欄名與每列內容；若不適合，填 null。
+11. 表格設計要優先模仿本團隊歷年教師版，例如「詞語／意義」、「標點符號／用法／造句（或例句）」、「六書／造字原則／例子」，或閱讀題可用「文本／關鍵證據／判斷」等真正有助學習的結構。
 7. 回覆時「只能輸出一個 JSON 物件」，不要加前言、後記、Markdown 說明或 ```json 程式碼圍欄。
 8. question_no 必須使用阿拉伯數字題號，並與本次題號完全一致。
 9. 能力類型請優先參照分析包中的「本團隊歷年能力類型分類證據」與既有分類名稱，不要任意創造新分類。
@@ -3071,6 +3107,14 @@ def _parse_batch_chatgpt_result(text, questions):
         alternative_category = str(item.get("備選能力類型", "") or "").strip()
         category_reason = str(item.get("能力類型判斷理由", "") or "").strip()
         lexical_verification = str(item.get("字詞查證紀錄", "") or "").strip()
+        note_table_obj = item.get("筆記策略表格", None)
+        if note_table_obj in ("", None, False):
+            note_table_json = ""
+        elif isinstance(note_table_obj, dict):
+            note_table_json = json.dumps(note_table_obj, ensure_ascii=False)
+        else:
+            errors.append(f"第{no}題「筆記策略表格」格式不是物件或 null，已略過表格。")
+            note_table_json = ""
 
         parsed_all[no] = {
             "suggested_category": suggested_category,
@@ -3082,6 +3126,7 @@ def _parse_batch_chatgpt_result(text, questions):
             "teaching_focus": values["教學重點"],
             "teaching": values["建議教學步驟"],
             "note_strategy": values["筆記策略"],
+            "note_strategy_table_json": note_table_json,
         }
 
     missing_questions = [
@@ -3124,6 +3169,7 @@ def _apply_batch_chatgpt_result(parsed_all, questions):
         q.teaching_focus = parsed.get("teaching_focus", "")
         q.teaching = parsed.get("teaching", "")
         q.note_strategy = parsed.get("note_strategy", "")
+        q.note_strategy_table_json = parsed.get("note_strategy_table_json", "")
 
         # Mark for a one-time safe widget-state synchronization on the next rerun.
         st.session_state[f"_chatgpt_sync_{q.source_no}"] = True
@@ -4098,19 +4144,6 @@ with tab2:
             q.group_id for q in qs
             if q.selected and (q.group_id or "").strip()
         }
-        missing_group_intro = []
-        for gid in selected_group_ids:
-            members = [q for q in qs if q.selected and (q.group_id or "").strip() == gid]
-            if members:
-                first = sorted(members, key=lambda x: x.source_no)[0]
-                if not (first.group_crop_pngs or []) and not (first.group_intro or first.material or "").strip():
-                    missing_group_intro.append(gid)
-        if missing_group_intro:
-            st.warning(
-                "以下題組缺少『題組頂端題幹／共用材料』，Word 無法還原原會考題組版面："
-                + "、".join(sorted(missing_group_intro))
-                + "。請回到題目結構校對補入，或重新以原 PDF 建立題庫。"
-            )
         for q in qs:
             if q.group_id and q.group_id in selected_group_ids:
                 q.selected = True
@@ -4446,6 +4479,7 @@ with tab3:
                 st.session_state[f"focus_{qno}"] = q.teaching_focus or ""
                 st.session_state[f"teach_{qno}"] = q.teaching or ""
                 st.session_state[f"note_{qno}"] = q.note_strategy or ""
+                st.session_state[f"note_table_{qno}"] = q.note_strategy_table_json or ""
                 st.session_state[f"custom_cat_{qno}"] = ""
                 st.session_state[f"chatgpt_full_import_notice_{qno}"] = True
 
@@ -4684,6 +4718,26 @@ with tab3:
             q.teaching_focus = st.text_area("教學重點", height=100, key=f"focus_{qno}")
             q.teaching = st.text_area("建議教學步驟", height=300, key=f"teach_{qno}")
             q.note_strategy = st.text_area("筆記策略（選填）", height=130, key=f"note_{qno}")
+
+            if f"note_table_{qno}" not in st.session_state:
+                st.session_state[f"note_table_{qno}"] = q.note_strategy_table_json or ""
+            with st.expander("📋 建議筆記表格（適合本題時才使用）", expanded=bool(q.note_strategy_table_json)):
+                st.caption("可直接修改 JSON；下方會即時預覽。若本題不適合表格，留白即可。")
+                q.note_strategy_table_json = st.text_area(
+                    "筆記策略表格 JSON",
+                    height=180,
+                    key=f"note_table_{qno}",
+                    placeholder='{"title":"學生課堂即時筆記如下：","columns":["欄1","欄2"],"rows":[["內容","內容"]],"footer":"★..."}'
+                )
+                spec = _parse_note_strategy_table(q.note_strategy_table_json)
+                if spec:
+                    st.markdown("**表格預覽**")
+                    st.dataframe([dict(zip(spec["columns"], row)) for row in spec["rows"]],
+                                 use_container_width=True, hide_index=True)
+                    if spec["footer"]:
+                        st.caption(spec["footer"])
+                elif q.note_strategy_table_json.strip():
+                    st.warning("表格 JSON 格式尚未正確，Word 會暫時略過此表格。")
 
             q.workbench_reviewed = st.checkbox(
                 "本題詳解與教學步驟已人工確認",
