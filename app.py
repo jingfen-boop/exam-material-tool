@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.2 ChatGPT 檔案往返版"
+APP_VERSION = "Web v6.3 能力類型 AI 建議＋人工調整版"
 
 # -----------------------------
 # Models
@@ -34,6 +34,9 @@ class Question:
     answer: str = ""
     pass_rate: Optional[float] = None
     category: str = ""
+    suggested_category: str = ""
+    alternative_category: str = ""
+    category_reason: str = ""
     explanation: str = ""
     synthesis_notes: str = ""
     teaching_focus: str = ""
@@ -1954,6 +1957,35 @@ def _history_examples_for_category(refdb, category: str, limit=6):
             break
     return out
 
+def _historical_category_evidence(refdb, per_category=2):
+    """Build compact evidence showing how existing internal categories appeared in past teacher editions."""
+    chunks = []
+    history_raw = refdb.get("history_raw", {}) or {}
+    for cat in [x for x in ABILITY_OPTIONS if x]:
+        found = []
+        for source, raw in history_raw.items():
+            if not raw:
+                continue
+            positions = [m.start() for m in re.finditer(re.escape(cat), raw)]
+            for pos in positions[:per_category]:
+                start=max(0,pos-260)
+                end=min(len(raw),pos+700)
+                excerpt=raw[start:end].strip()
+                if excerpt:
+                    found.append((source,excerpt))
+                if len(found)>=per_category:
+                    break
+            if len(found)>=per_category:
+                break
+        if found:
+            chunks.append(f"【歷年分類：{cat}】")
+            for source,excerpt in found:
+                chunks.append(f"- {source}\n{excerpt}")
+    if not chunks:
+        return "（目前參考庫未辨識到可用的歷年能力類型標示；請依既有分類名稱與題目主要認知任務提出建議，並標示需人工確認。）"
+    return "\n\n".join(chunks)
+
+
 def _strategy_for_category(refdb, category: str):
     return refdb.get("strategy", {}).get(category) or DEFAULT_STRATEGY_LIBRARY.get(category) or DEFAULT_STRATEGY_LIBRARY["其他"]
 
@@ -1965,6 +1997,9 @@ def _drafts_from_questions(questions, year):
     for q in questions:
         drafts[str(q.source_no)] = {
             "category": q.category,
+            "suggested_category": q.suggested_category,
+            "alternative_category": q.alternative_category,
+            "category_reason": q.category_reason,
             "synthesis_notes": q.synthesis_notes,
             "explanation": q.explanation,
             "teaching_focus": q.teaching_focus,
@@ -1987,6 +2022,9 @@ def _apply_drafts_to_questions(payload, questions):
         if not q or not isinstance(d, dict):
             continue
         q.category = d.get("category", q.category)
+        q.suggested_category = d.get("suggested_category", getattr(q, "suggested_category", ""))
+        q.alternative_category = d.get("alternative_category", getattr(q, "alternative_category", ""))
+        q.category_reason = d.get("category_reason", getattr(q, "category_reason", ""))
         q.synthesis_notes = d.get("synthesis_notes", q.synthesis_notes)
         q.explanation = d.get("explanation", q.explanation)
         q.teaching_focus = d.get("teaching_focus", q.teaching_focus)
@@ -2543,6 +2581,9 @@ def _build_chatgpt_analysis_package(refdb, q):
 【本團隊歷年同能力類型參考】
 {chr(10).join(hist_text)}
 
+【本團隊歷年能力類型分類證據】
+{_historical_category_evidence(refdb)}
+
 【本團隊此能力類型教學框架】
 教學重點：
 {strategy.get('教學重點', '')}
@@ -2645,6 +2686,9 @@ def _build_batch_chatgpt_package(refdb, questions):
         "questions": [
             {
                 "question_no": required_nos[0] if required_nos else "1",
+                "建議能力類型": "從本團隊歷年既有分類中選一個最適合者",
+                "備選能力類型": "若有合理第二選擇則填寫，否則留空",
+                "能力類型判斷理由": "簡述主要認知任務及為何符合歷年分類",
                 "三家比較筆記": "完整內容",
                 "建議詳解": "完整內容",
                 "教學重點": "完整內容",
@@ -2668,7 +2712,13 @@ def _build_batch_chatgpt_package(refdb, questions):
 6. 若資料不足，請在對應欄位明確寫「需人工確認」，不要杜撰。
 7. 回覆時「只能輸出一個 JSON 物件」，不要加前言、後記、Markdown 說明或 ```json 程式碼圍欄。
 8. question_no 必須使用阿拉伯數字題號，並與本次題號完全一致。
-9. 每題固定包含以下五個欄位，欄位名稱不可更改：
+9. 能力類型請優先參照分析包中的「本團隊歷年能力類型分類證據」與既有分類名稱，不要任意創造新分類。
+10. 每題先提供三個能力分類欄位：
+   建議能力類型、備選能力類型、能力類型判斷理由。
+   - 「建議能力類型」選最能代表本題主要認知任務的既有類別。
+   - 題目若合理跨類型，才填「備選能力類型」；沒有則留空。
+   - 若歷年資料不足以支持分類，理由中請明確標示「需人工確認」。
+11. 每題另固定包含以下五個內容欄位，欄位名稱不可更改：
    三家比較筆記、建議詳解、教學重點、建議教學步驟、筆記策略。
 
 JSON 結構範例：
@@ -2754,7 +2804,14 @@ def _parse_batch_chatgpt_result(text, questions):
             errors.append(f"第{no}題缺少內容：" + "、".join(missing_fields))
             continue
 
+        suggested_category = str(item.get("建議能力類型", "") or "").strip()
+        alternative_category = str(item.get("備選能力類型", "") or "").strip()
+        category_reason = str(item.get("能力類型判斷理由", "") or "").strip()
+
         parsed_all[no] = {
+            "suggested_category": suggested_category,
+            "alternative_category": alternative_category,
+            "category_reason": category_reason,
             "synthesis_notes": values["三家比較筆記"],
             "explanation": values["建議詳解"],
             "teaching_focus": values["教學重點"],
@@ -2779,6 +2836,13 @@ def _apply_batch_chatgpt_result(parsed_all, questions):
         if q is None:
             continue
         qno=q.source_no
+        q.suggested_category = parsed.get("suggested_category", "")
+        q.alternative_category = parsed.get("alternative_category", "")
+        q.category_reason = parsed.get("category_reason", "")
+        # If the user has not yet chosen a final category, prefill the AI recommendation.
+        if not (q.category or "").strip() and q.suggested_category:
+            q.category = q.suggested_category
+            st.session_state[f"cat_{qno}"] = q.category
         st.session_state[f"syn_{qno}"]=parsed["synthesis_notes"]
         st.session_state[f"exp_{qno}"]=parsed["explanation"]
         st.session_state[f"focus_{qno}"]=parsed["teaching_focus"]
@@ -3960,7 +4024,7 @@ with tab3:
             st.markdown("#### 步驟 2｜把 ChatGPT 回傳的 JSON 檔上傳回來")
             st.caption(
                 "ChatGPT 完成後，下載它提供的 .json 檔，再直接上傳到這裡。"
-                "程式會自動預檢題數與五個欄位，不需要打開 JSON，也不用複製貼上。"
+                "程式會自動預檢題數、能力類型建議與五個內容欄位，不需要打開 JSON，也不用複製貼上。"
             )
             result_json_file = st.file_uploader(
                 "上傳 ChatGPT 完成稿 JSON",
@@ -4084,14 +4148,36 @@ with tab3:
                     else:
                         st.info("目前年度參考庫沒有辨識到這一題，請回「① 年度資料」檢查來源檔。")
 
-            st.markdown("### 二、能力類型與歷年本團隊寫法")
-            current = q.category if q.category in ABILITY_OPTIONS else ""
-            q.category = st.selectbox(
-                "能力類型",
-                ABILITY_OPTIONS,
-                index=ABILITY_OPTIONS.index(current),
-                key=f"cat_{qno}"
+            st.markdown("### 二、能力類型：AI 建議＋人工確認")
+            if getattr(q, "suggested_category", ""):
+                st.success(f"AI 建議：**{q.suggested_category}**")
+                if getattr(q, "alternative_category", ""):
+                    st.caption(f"備選：{q.alternative_category}")
+                if getattr(q, "category_reason", ""):
+                    st.info("判斷理由：" + q.category_reason)
+            else:
+                st.caption("目前尚無 AI 能力類型建議。使用上方整批 ChatGPT 分析流程後，會依歷年分類資料提供首選、備選與理由。")
+
+            # Final category remains fully editable by the user.
+            base_options = list(ABILITY_OPTIONS)
+            for extra in [getattr(q, "suggested_category", ""), getattr(q, "alternative_category", ""), q.category]:
+                if extra and extra not in base_options:
+                    base_options.append(extra)
+            current = q.category if q.category in base_options else ""
+            selected_category = st.selectbox(
+                "最終能力類型（可自行調整）",
+                base_options,
+                index=base_options.index(current),
+                key=f"cat_{qno}",
+                help="AI 只提供建議；這裡才是最後採用的分類，你可以改成其他既有類別。"
             )
+            custom_category = st.text_input(
+                "自訂能力類型（選填）",
+                value="",
+                key=f"custom_cat_{qno}",
+                placeholder="若既有選項都不適合，可自行輸入；留白則採用上方選擇。"
+            )
+            q.category = custom_category.strip() or selected_category
 
             strategy = _strategy_for_category(refdb, q.category or "其他")
             if q.category:
