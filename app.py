@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.4 JSON 八欄完整匯入版"
+APP_VERSION = "Web v6.7 教育部辭典優先查證版"
 
 # -----------------------------
 # Models
@@ -39,6 +39,7 @@ class Question:
     category_reason: str = ""
     explanation: str = ""
     synthesis_notes: str = ""
+    lexical_verification: str = ""
     teaching_focus: str = ""
     teaching: str = ""
     note_strategy: str = ""
@@ -579,45 +580,173 @@ def set_cell_shading(cell, fill):
     shd.set(qn("w:fill"), fill)
     tcPr.append(shd)
 
-def set_eastasia(run, font="Microsoft JhengHei"):
+def set_eastasia(run, font="標楷體"):
     run.font.name = font
     run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
 
+def _set_run_word_style(run, font="標楷體", size=13, color=None, bold=None):
+    set_eastasia(run, font)
+    run.font.size = Pt(size)
+    if color is not None:
+        run.font.color.rgb = color
+    if bold is not None:
+        run.bold = bold
+
+
+def _set_body_paragraph_format(p, before=0, after=0):
+    p.paragraph_format.space_before = Pt(before)
+    p.paragraph_format.space_after = Pt(after)
+    p.paragraph_format.line_spacing = 1.0
+
+
 def add_meta_runs(p, year, source_no, pass_rate, category):
+    """Match the historical teacher-edition metadata strip:
+    grey year/source, cyan pass rate, yellow ability category.
+    """
     r = p.add_run(f"{year} 會考-{source_no}")
-    set_eastasia(r)
-    r.font.size = Pt(10)
-    r.font.highlight_color = None
-    # Grey via shading on run
+    _set_run_word_style(r, size=12)
     rPr = r._element.get_or_add_rPr()
     shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), "D9D9D9"); rPr.append(shd)
 
     rate = "" if pass_rate is None else f"{pass_rate:.2f}"
     r = p.add_run(rate)
-    set_eastasia(r)
-    r.font.size = Pt(10)
+    _set_run_word_style(r, size=12)
     rPr = r._element.get_or_add_rPr()
     shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), "00E5FF"); rPr.append(shd)
 
     if category:
         r = p.add_run(_clean_word_text(category))
-        set_eastasia(r)
-        r.font.size = Pt(10)
+        _set_run_word_style(r, size=12)
         rPr = r._element.get_or_add_rPr()
         shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), "FFF200"); rPr.append(shd)
+
 
 def setup_doc(doc: Document):
     sec = doc.sections[0]
     sec.page_width = Cm(21)
     sec.page_height = Cm(29.7)
-    sec.top_margin = Cm(1.5)
-    sec.bottom_margin = Cm(1.5)
-    sec.left_margin = Cm(1.6)
-    sec.right_margin = Cm(1.6)
+    sec.top_margin = Cm(1.87)
+    sec.bottom_margin = Cm(0.50)
+    sec.left_margin = Cm(2.12)
+    sec.right_margin = Cm(2.12)
     normal = doc.styles["Normal"]
-    normal.font.name = "Microsoft JhengHei"
-    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft JhengHei")
-    normal.font.size = Pt(11)
+    normal.font.name = "標楷體"
+    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "標楷體")
+    normal.font.size = Pt(13)
+
+
+def setup_exam_style_doc(doc: Document):
+    """A4 layout matching the historical internal teacher edition."""
+    sec = doc.sections[0]
+    sec.page_width = Cm(21)
+    sec.page_height = Cm(29.7)
+    sec.top_margin = Cm(1.87)
+    sec.bottom_margin = Cm(0.50)
+    sec.left_margin = Cm(2.12)
+    sec.right_margin = Cm(2.12)
+    normal = doc.styles["Normal"]
+    normal.font.name = "標楷體"
+    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "標楷體")
+    normal.font.size = Pt(13)
+
+
+def _set_cell_margins(cell, top=0, start=108, bottom=0, end=108):
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    tcMar = tcPr.first_child_found_in("w:tcMar")
+    if tcMar is None:
+        tcMar = OxmlElement("w:tcMar")
+        tcPr.append(tcMar)
+    for m, v in (("top", top), ("left", start), ("bottom", bottom), ("right", end)):
+        node = tcMar.find(qn(f"w:{m}"))
+        if node is None:
+            node = OxmlElement(f"w:{m}")
+            tcMar.append(node)
+        node.set(qn("w:w"), str(v))
+        node.set(qn("w:type"), "dxa")
+
+
+def _set_teacher_box_borders(table):
+    tblPr = table._tbl.tblPr
+    borders = tblPr.first_child_found_in("w:tblBorders")
+    if borders is not None:
+        tblPr.remove(borders)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), "4")   # historical sample: 0.5 pt
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "000000")
+        borders.append(el)
+    for edge in ("insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "nil")
+        borders.append(el)
+    tblPr.append(borders)
+
+
+def _add_red_paragraph(cell, text="", label=False):
+    p = cell.add_paragraph() if cell.paragraphs and cell.paragraphs[0].text else cell.paragraphs[0]
+    _set_body_paragraph_format(p, before=1.2 if label else 0, after=0)
+    r = p.add_run(_clean_word_text(text))
+    _set_run_word_style(r, font="標楷體", size=12, color=RGBColor(255, 0, 0), bold=False)
+    return p
+
+
+def _add_red_multiline(cell, text):
+    lines = _clean_word_text(text or "").splitlines() or [""]
+    for line in lines:
+        _add_red_paragraph(cell, line)
+
+
+def _add_legacy_teacher_box(doc, q: Question):
+    """One thin black box per question, matching the historical teacher edition."""
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = True
+    _set_teacher_box_borders(table)
+    cell = table.cell(0, 0)
+    _set_cell_margins(cell, top=0, start=108, bottom=0, end=108)
+
+    # Clear the default paragraph cleanly and reuse it for the first label.
+    p0 = cell.paragraphs[0]
+    p0.text = ""
+    _set_body_paragraph_format(p0, before=1.2, after=0)
+    r = p0.add_run("解析：")
+    _set_run_word_style(r, font="標楷體", size=12, color=RGBColor(255, 0, 0), bold=False)
+    _add_red_multiline(cell, q.explanation or "（待補）")
+
+    if (q.teaching_focus or "").strip():
+        _add_red_paragraph(cell, "", label=False)
+        _add_red_paragraph(cell, "【教學重點】：", label=True)
+        _add_red_multiline(cell, q.teaching_focus)
+
+    _add_red_paragraph(cell, "", label=False)
+    _add_red_paragraph(cell, "【教學步驟】：", label=True)
+    _add_red_multiline(cell, q.teaching or "（待補）")
+
+    if (q.note_strategy or "").strip():
+        _add_red_paragraph(cell, "", label=False)
+        _add_red_paragraph(cell, "【筆記策略】：", label=True)
+        _add_red_multiline(cell, q.note_strategy)
+
+    return table
+
+
+def _add_answer_prefix(p, q, display_no, teacher):
+    """Historical look: black parentheses/number, red answer letter only."""
+    r = p.add_run("（ ")
+    _set_run_word_style(r, size=13)
+    if teacher and q.answer:
+        r = p.add_run(_clean_word_text(q.answer))
+        _set_run_word_style(r, size=13, color=RGBColor(255, 0, 0))
+    else:
+        r = p.add_run("  ")
+        _set_run_word_style(r, size=13)
+    r = p.add_run(f" ）{display_no}. ")
+    _set_run_word_style(r, size=13)
+
 
 def add_header(doc, title):
     p = doc.add_paragraph()
@@ -669,61 +798,78 @@ def add_question(doc, q: Question, display_no: int, year: int, teacher=False, us
         cell = box.cell(0,0)
         p = cell.paragraphs[0]
         r = p.add_run("解析：\n")
-        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
-        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.teaching_focus.strip():
             p = cell.add_paragraph()
             r = p.add_run("【教學重點】：\n")
-            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
             r2 = p.add_run(_clean_word_text(q.teaching_focus))
-            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = cell.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
-        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
-        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.note_strategy.strip():
             p = cell.add_paragraph()
             r = p.add_run("【筆記策略】：\n")
-            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
             r2 = p.add_run(_clean_word_text(q.note_strategy))
-            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
     doc.add_paragraph()
 
-def setup_exam_style_doc(doc: Document):
-    """A4 exam-like page with restrained margins and no worksheet metadata."""
-    sec = doc.sections[0]
-    sec.page_width = Cm(21)
-    sec.page_height = Cm(29.7)
-    sec.top_margin = Cm(1.35)
-    sec.bottom_margin = Cm(1.35)
-    sec.left_margin = Cm(1.45)
-    sec.right_margin = Cm(1.45)
-    normal = doc.styles["Normal"]
-    normal.font.name = "Microsoft JhengHei"
-    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft JhengHei")
-    normal.font.size = Pt(11)
-
 def add_exam_style_header(doc, title):
+    """Fallback header matching the historical student/teacher booklet."""
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(4)
+    p.paragraph_format.space_after = Pt(3)
     r = p.add_run(title)
-    set_eastasia(r)
+    set_eastasia(r, "標楷體")
     r.bold = True
     r.font.size = Pt(16)
 
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    p.paragraph_format.space_after = Pt(7)
-    r = p.add_run("姓名：____________________")
-    set_eastasia(r)
-    r.font.size = Pt(10)
+    # Right-aligned 3 x 2 score/name box.
+    holder = doc.add_table(rows=3, cols=2)
+    holder.alignment = WD_TABLE_ALIGNMENT.RIGHT
+    holder.autofit = False
+    widths = [Cm(2.4), Cm(2.1)]
+    labels = ["姓名", "目標題數", "答對題數"]
+    for rr in range(3):
+        for cc in range(2):
+            holder.cell(rr, cc).width = widths[cc]
+            p2 = holder.cell(rr, cc).paragraphs[0]
+            p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p2.paragraph_format.space_before = Pt(0)
+            p2.paragraph_format.space_after = Pt(0)
+            if cc == 0:
+                run = p2.add_run(labels[rr])
+                set_eastasia(run, "標楷體")
+                run.font.size = Pt(11)
+
+    tblPr = holder._tbl.tblPr
+    borders = tblPr.first_child_found_in("w:tblBorders")
+    if borders is not None:
+        tblPr.remove(borders)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), "4")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "000000")
+        borders.append(el)
+    tblPr.append(borders)
+
+    psp = doc.add_paragraph()
+    psp.paragraph_format.space_before = Pt(0)
+    psp.paragraph_format.space_after = Pt(4)
+
 
 def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
                              show_new_number=False, show_source_meta=False):
@@ -756,7 +902,7 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
         p.paragraph_format.space_after = Pt(1.5)
         r = p.add_run(f"原題：{q.source_no}｜通過率：{q.pass_rate if q.pass_rate is not None else '—'}")
         set_eastasia(r)
-        r.font.size = Pt(8)
+        r.font.size = Pt(12)
 
     if teacher:
         p = doc.add_paragraph()
@@ -771,29 +917,29 @@ def add_source_crop_question(doc, q: Question, display_no: int, teacher=False,
         cell = box.cell(0,0)
         p = cell.paragraphs[0]
         r = p.add_run("解析：\n")
-        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
-        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.teaching_focus.strip():
             p = cell.add_paragraph()
             r = p.add_run("【教學重點】：\n")
-            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
             r2 = p.add_run(_clean_word_text(q.teaching_focus))
-            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = cell.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
-        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
-        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.note_strategy.strip():
             p = cell.add_paragraph()
             r = p.add_run("【筆記策略】：\n")
-            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
             r2 = p.add_run(_clean_word_text(q.note_strategy))
-            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
     spacer = doc.add_paragraph()
     spacer.paragraph_format.space_after = Pt(2)
@@ -854,7 +1000,7 @@ def trim_full_image_left_gutter(data: bytes, ratio: float = 0.075) -> bytes:
     except Exception:
         return data
 
-def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=False):
+def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=False, year=None):
     """
     Full-image mode for complex source questions.
     Editable: answer bracket + new question number.
@@ -891,25 +1037,33 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
         except Exception:
             pass
 
+    # Student and teacher booklets both retain the historical source/rate/category strip.
+    if year is not None:
+        pm = doc.add_paragraph()
+        pm.paragraph_format.left_indent = Cm(0.35)
+        pm.paragraph_format.space_before = Pt(0)
+        pm.paragraph_format.space_after = Pt(1)
+        add_meta_runs(pm, year, q.source_no, q.pass_rate, q.category)
+
     if teacher:
         p = doc.add_paragraph()
         r = p.add_run("解析：\n")
-        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
-        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
         if q.teaching_focus.strip():
             p = doc.add_paragraph()
             r = p.add_run("【教學重點】：\n")
-            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
             r2 = p.add_run(_clean_word_text(q.teaching_focus))
-            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+            set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
         p = doc.add_paragraph()
         r = p.add_run("【教學步驟】：\n")
-        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
         r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
-        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+        set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
 
 
 
@@ -1057,40 +1211,34 @@ def _wrap_body_elements_in_keep_table(doc, start_index: int):
     else:
         body.append(tbl)
 
-def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False):
+def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
+                               show_material=True, year=None):
     material_text = _clean_word_text(q.material)
     stem_text = _clean_word_text(q.text)
-    clean_options = {k: _clean_word_text(q.options.get(k, "")) for k in ("A", "B", "C", "D")}
 
-    """
-    Editable-first output:
-    - all extracted/manually corrected text is real Word text;
-    - non-text visual material is inserted as image files;
-    - layout approximates the original exam with a small set of reusable templates.
-    """
-    style = q.layout_style or "一般直列"
-
-    if material_text:
+    if show_material and material_text:
         p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(2)
-        p.paragraph_format.space_after = Pt(4)
+        _set_body_paragraph_format(p, before=1, after=1)
         r = p.add_run(material_text)
-        set_eastasia(r)
-        r.font.size = Pt(10.5)
+        _set_run_word_style(r, size=13)
+
+    style = q.layout_style or "一般直列"
 
     if style == "圖片在右" and q.include_image and q.image_pngs:
         table = doc.add_table(rows=1, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.autofit = False
         table.columns[0].width = Cm(10.7)
-        table.columns[1].width = Cm(6.4)
-
+        table.columns[1].width = Cm(6.0)
         c0, c1 = table.cell(0,0), table.cell(0,1)
         p = c0.paragraphs[0]
-        r = p.add_run(f"（{' ' + _clean_word_text(q.answer) + ' ' if teacher and q.answer else '   '}）{display_no}. {stem_text}")
-        set_eastasia(r)
-        r.font.size = Pt(10.5)
-        _add_first_image_to_cell(c1, q, width_cm=5.9)
+        _set_body_paragraph_format(p, after=0)
+        _add_answer_prefix(p, q, display_no, teacher)
+        r = p.add_run(stem_text)
+        _set_run_word_style(r, size=13)
+        if year is not None:
+            add_meta_runs(p, year, q.source_no, q.pass_rate, q.category)
+        _add_first_image_to_cell(c1, q, width_cm=5.6)
 
         tblPr = table._tbl.tblPr
         borders = OxmlElement("w:tblBorders")
@@ -1101,61 +1249,68 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False)
         tblPr.append(borders)
     else:
         p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(2)
-        p.paragraph_format.space_after = Pt(1)
-        r = p.add_run(f"（{' ' + _clean_word_text(q.answer) + ' ' if teacher and q.answer else '   '}）{display_no}. {stem_text}")
-        set_eastasia(r)
-        r.font.size = Pt(10.5)
+        _set_body_paragraph_format(p, before=1, after=0)
+        _add_answer_prefix(p, q, display_no, teacher)
+        r = p.add_run(stem_text)
+        _set_run_word_style(r, size=13)
+        if year is not None:
+            add_meta_runs(p, year, q.source_no, q.pass_rate, q.category)
 
         if style == "圖片在上" and q.include_image and q.image_pngs:
             ip = doc.add_paragraph()
             ip.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            _set_body_paragraph_format(ip, after=0)
             try:
                 ip.add_run().add_picture(io.BytesIO(q.image_pngs[0]), width=Cm(14.8))
             except Exception:
                 pass
 
-    # If there are additional images, preserve them below the stem.
     if q.include_image and len(q.image_pngs) > 1:
         for data in q.image_pngs[1:]:
             ip = doc.add_paragraph()
             ip.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            _set_body_paragraph_format(ip, after=0)
             try:
                 ip.add_run().add_picture(io.BytesIO(data), width=Cm(13.5))
             except Exception:
                 pass
 
-    _add_editable_options(doc, q, two_columns=(style == "選項兩欄"))
+    # Options: historical edition uses larger Kai-style body text.
+    if style == "選項兩欄":
+        table = doc.add_table(rows=2, cols=2)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = True
+        pairs = [("A",0,0),("B",0,1),("C",1,0),("D",1,1)]
+        for key, rr, cc in pairs:
+            cell = table.cell(rr,cc)
+            cell.text = ""
+            p = cell.paragraphs[0]
+            _set_body_paragraph_format(p, after=0)
+            r = p.add_run(f"({key}) {_clean_word_text(q.options.get(key,''))}")
+            _set_run_word_style(r, size=13)
+        tblPr = table._tbl.tblPr
+        borders = OxmlElement("w:tblBorders")
+        for edge in ("top","left","bottom","right","insideH","insideV"):
+            el = OxmlElement(f"w:{edge}")
+            el.set(qn("w:val"), "nil")
+            borders.append(el)
+        tblPr.append(borders)
+    else:
+        for key in ("A","B","C","D"):
+            opt = _clean_word_text(q.options.get(key, ""))
+            if not opt:
+                continue
+            po = doc.add_paragraph()
+            _set_body_paragraph_format(po, after=0)
+            ro = po.add_run(f"({key}) {opt}")
+            _set_run_word_style(ro, size=13)
 
     if teacher:
-        p = doc.add_paragraph()
-        r = p.add_run("解析：\n")
-        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
-        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
+        _add_legacy_teacher_box(doc, q)
 
-        if q.teaching_focus.strip():
-            p = doc.add_paragraph()
-            r = p.add_run("【教學重點】：\n")
-            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(_clean_word_text(q.teaching_focus))
-            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
-
-        p = doc.add_paragraph()
-        r = p.add_run("【教學步驟】：\n")
-        set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
-        set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
-
-        if q.note_strategy.strip():
-            p = doc.add_paragraph()
-            r = p.add_run("【筆記策略】：\n")
-            set_eastasia(r); r.bold = True; r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(_clean_word_text(q.note_strategy))
-            set_eastasia(r2); r2.font.color.rgb = RGBColor(255,0,0)
-
-    # Keep only normal paragraph spacing; do not insert an empty spacer paragraph.
-
+    # A small inter-question separation only; historical sample is compact.
+    psp = doc.add_paragraph()
+    _set_body_paragraph_format(psp, after=0)
 
 def _zh_num(n: int) -> str:
     digits = "零一二三四五六七八九"
@@ -1267,6 +1422,15 @@ def _add_stable_page_break_if_needed(doc, q: Question, used_lines: float, first_
         return need, True
     return used_lines + need, False
 
+def _add_exam_section_heading(doc, text):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(6)
+    p.paragraph_format.space_after = Pt(4)
+    r = p.add_run(text)
+    _set_run_word_style(r, font="標楷體", size=13, bold=True)
+    return p
+
+
 def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
                                    teacher=False, template_kind="自訂簡版", booklet_no=""):
     selected = [q for q in questions if q.selected]
@@ -1280,26 +1444,53 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
         setup_exam_style_doc(doc)
         title = (title_suffix or "").strip() or f"{year}年國中教育會考 國文科"
         add_exam_style_header(doc, title)
-        p = doc.add_paragraph()
-        r = p.add_run("壹、單題")
-        set_eastasia(r)
-        r.bold = True
+        _add_exam_section_heading(doc, "壹、單題")
 
-    # v2.7 compact natural pagination:
-    # Do not estimate or reserve an entire question's height.
-    # Word is allowed to flow naturally, preventing large blank areas.
+    # Historical structure:
+    #   壹、單題
+    #   [all ungrouped questions]
+    #   貳、閱讀題組
+    #   [each shared reading passage appears once, followed by its subquestions]
+    last_group_key = None
+    last_material = None
+    entered_reading_section = False
+
     for i, q in enumerate(selected, start=1):
         mode = _effective_render_mode(q)
+        group_key = (q.group_id or "").strip()
+        material_key = _clean_word_text(q.material or "").strip()
+
+        # Insert "貳、閱讀題組" immediately before the first grouped item.
+        if group_key and not entered_reading_section:
+            _add_exam_section_heading(doc, "貳、閱讀題組")
+            entered_reading_section = True
+
+        # Shared reading material is shown once per group.
+        if group_key:
+            show_material = (group_key != last_group_key)
+        elif material_key:
+            show_material = (material_key != last_material)
+        else:
+            show_material = False
+
         if mode == "整題圖像":
-            add_full_image_exam_question(doc, q, i, teacher=teacher)
+            add_full_image_exam_question(
+                doc, q, i, teacher=teacher, year=year
+            )
         else:
             keep_short = _question_is_short_for_keep(q)
             body = doc._element.body
             sectPr = body.find(qn("w:sectPr"))
             start_index = list(body).index(sectPr) if sectPr is not None else len(list(body))
-            add_editable_exam_question(doc, q, i, teacher=teacher)
+            add_editable_exam_question(
+                doc, q, i, teacher=teacher,
+                show_material=show_material, year=year
+            )
             if keep_short:
                 _wrap_body_elements_in_keep_table(doc, start_index)
+
+        last_group_key = group_key or None
+        last_material = material_key or None
 
     out = io.BytesIO()
     _remove_empty_body_paragraphs(doc)
@@ -2594,6 +2785,17 @@ def _build_chatgpt_analysis_package(refdb, q):
 筆記策略：
 {strategy.get('筆記策略', '')}
 
+【字詞解釋的強制查證規則】
+凡建議詳解、教學重點、教學步驟或筆記策略牽涉字義、詞義、成語義、文言詞義或語詞用法，必須實際查證，不得只憑模型記憶。
+固定優先順序：
+① 教育部《國語辭典簡編本》。
+② 簡編本查無詞目或無符合本題語境的義項，才查教育部《重編國語辭典修訂本》。
+③ 上述兩部教育部辭典皆查無適用資料，才參考翰林、康軒、南一在本題資料中的定義。
+必須依本題語境選義項，不可直接套第一義。若採②或③，須說明上一順位為何不適用。
+若無法實際連網查證，請明寫「需人工查證」，不可杜撰辭典內容或來源。
+若直接引用教育部釋義，不可任意改寫；若為教材可讀性而轉述，標示「依教育部辭典義項整理」。
+本題若完全無需字詞解釋，字詞查證紀錄填「本題無需字詞查證」。
+
 【你的任務】
 1. 先比較三家出版社：共同核心、互補之處、是否有說法差異。
 2. 參照本團隊歷年教師版的詳略、語氣、結構與教學步驟寫法。
@@ -2605,6 +2807,9 @@ def _build_chatgpt_analysis_package(refdb, q):
 
 【三家比較筆記】
 （內容）
+
+【字詞查證紀錄】
+（逐項列出：字詞｜採用來源｜適用義項／依義項整理｜必要時說明上一順位查無適用資料；無則寫「本題無需字詞查證」）
 
 【建議詳解】
 （內容）
@@ -2629,6 +2834,7 @@ def _parse_chatgpt_integrated_result(text):
 
     headings = [
         "三家比較筆記",
+        "字詞查證紀錄",
         "建議詳解",
         "教學重點",
         "建議教學步驟",
@@ -2656,6 +2862,7 @@ def _parse_chatgpt_integrated_result(text):
 
     return {
         "synthesis_notes": found.get("三家比較筆記", ""),
+        "lexical_verification": found.get("字詞查證紀錄", ""),
         "explanation": found.get("建議詳解", ""),
         "teaching_focus": found.get("教學重點", ""),
         "teaching": found.get("建議教學步驟", ""),
@@ -2690,6 +2897,7 @@ def _build_batch_chatgpt_package(refdb, questions):
                 "備選能力類型": "若有合理第二選擇則填寫，否則留空",
                 "能力類型判斷理由": "簡述主要認知任務及為何符合歷年分類",
                 "三家比較筆記": "完整內容",
+                "字詞查證紀錄": "逐項列出字詞、採用來源與適用義項；無需查證則明記",
                 "建議詳解": "完整內容",
                 "教學重點": "完整內容",
                 "建議教學步驟": "完整內容",
@@ -2718,8 +2926,16 @@ def _build_batch_chatgpt_package(refdb, questions):
    - 「建議能力類型」選最能代表本題主要認知任務的既有類別。
    - 題目若合理跨類型，才填「備選能力類型」；沒有則留空。
    - 若歷年資料不足以支持分類，理由中請明確標示「需人工確認」。
-11. 每題另固定包含以下五個內容欄位，欄位名稱不可更改：
-   三家比較筆記、建議詳解、教學重點、建議教學步驟、筆記策略。
+11. 每題另固定包含以下六個內容欄位，欄位名稱不可更改：
+   三家比較筆記、字詞查證紀錄、建議詳解、教學重點、建議教學步驟、筆記策略。
+12. 只要任何輸出牽涉字義、詞義、成語義、文言詞義或語詞用法，必須實際查證：
+   ①教育部《國語辭典簡編本》→②教育部《重編國語辭典修訂本》→③三家出版社。
+   只有上一順位查無詞目或無符合本題語境的義項，才能使用下一順位。
+   若採②或③，須在「字詞查證紀錄」說明上一順位不適用的原因。
+   若無法實際查證，明寫「需人工查證」，不得憑模型記憶杜撰。
+   若本題無需字詞解釋，填「本題無需字詞查證」。
+13. 必須依本題語境選義項。直接引用教育部釋義時不得任意改寫；
+   若為教材可讀性而轉述，標示「依教育部辭典義項整理」。
 
 JSON 結構範例：
 {json.dumps(schema_example, ensure_ascii=False, indent=2)}
@@ -2807,12 +3023,14 @@ def _parse_batch_chatgpt_result(text, questions):
         suggested_category = str(item.get("建議能力類型", "") or "").strip()
         alternative_category = str(item.get("備選能力類型", "") or "").strip()
         category_reason = str(item.get("能力類型判斷理由", "") or "").strip()
+        lexical_verification = str(item.get("字詞查證紀錄", "") or "").strip()
 
         parsed_all[no] = {
             "suggested_category": suggested_category,
             "alternative_category": alternative_category,
             "category_reason": category_reason,
             "synthesis_notes": values["三家比較筆記"],
+            "lexical_verification": lexical_verification,
             "explanation": values["建議詳解"],
             "teaching_focus": values["教學重點"],
             "teaching": values["建議教學步驟"],
@@ -2854,6 +3072,7 @@ def _apply_batch_chatgpt_result(parsed_all, questions):
         # The five content fields are the ChatGPT finished draft and must be
         # imported directly instead of waiting for the rule-based backup button.
         q.synthesis_notes = parsed.get("synthesis_notes", "")
+        q.lexical_verification = parsed.get("lexical_verification", "")
         q.explanation = parsed.get("explanation", "")
         q.teaching_focus = parsed.get("teaching_focus", "")
         q.teaching = parsed.get("teaching", "")
@@ -3358,7 +3577,7 @@ with ref_tab:
     st.markdown("## E. 本年度整合建議稿")
     st.caption(
         "這裡保存的是『你真正編輯過的成果』，和 C 區的『來源參考庫』不同。"
-        "包含每題能力類型、三家比較筆記、建議詳解、教學重點、教學步驟與筆記策略。"
+        "包含每題能力類型、三家比較筆記、字詞查證紀錄、建議詳解、教學重點、教學步驟與筆記策略。"
     )
 
     draft_upload = st.file_uploader(
@@ -4106,7 +4325,7 @@ with tab3:
                 errs = st.session_state.pop("batch_import_errors", [])
                 if count:
                     st.success(f"已成功匯入 {count} 題。接下來直接往下逐題檢查與微調，不需要再貼任何 ChatGPT 內容。")
-                    st.info("下一步：逐題確認【三家比較筆記】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】；若某一題真的需要重做，再展開該題的「進階／單題重做」。")
+                    st.info("下一步：逐題確認【三家比較筆記】【字詞查證紀錄】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】；若某一題真的需要重做，再展開該題的「進階／單題重做」。")
                 if errs:
                     st.warning("；".join(errs))
             st.divider()
@@ -4162,6 +4381,7 @@ with tab3:
             if st.session_state.pop(f"_chatgpt_sync_{qno}", False):
                 st.session_state[f"cat_{qno}"] = q.category or ""
                 st.session_state[f"syn_{qno}"] = q.synthesis_notes or ""
+                st.session_state[f"lex_{qno}"] = q.lexical_verification or ""
                 st.session_state[f"exp_{qno}"] = q.explanation or ""
                 st.session_state[f"focus_{qno}"] = q.teaching_focus or ""
                 st.session_state[f"teach_{qno}"] = q.teaching or ""
@@ -4251,7 +4471,7 @@ with tab3:
                         use_container_width=True
                     )
 
-                st.markdown("**把 ChatGPT 回傳的五段整合稿貼回來：**")
+                st.markdown("**把 ChatGPT 回傳的六段整合稿貼回來：**")
                 pasted_result = st.text_area(
                     "ChatGPT 整合結果",
                     height=300,
@@ -4268,12 +4488,14 @@ with tab3:
                         return
 
                     st.session_state[f"syn_{qno}"] = parsed["synthesis_notes"]
+                    st.session_state[f"lex_{qno}"] = parsed.get("lexical_verification", "")
                     st.session_state[f"exp_{qno}"] = parsed["explanation"]
                     st.session_state[f"focus_{qno}"] = parsed["teaching_focus"]
                     st.session_state[f"teach_{qno}"] = parsed["teaching"]
                     st.session_state[f"note_{qno}"] = parsed["note_strategy"]
 
                     q.synthesis_notes = parsed["synthesis_notes"]
+                    q.lexical_verification = parsed.get("lexical_verification", "")
                     q.explanation = parsed["explanation"]
                     q.teaching_focus = parsed["teaching_focus"]
                     q.teaching = parsed["teaching"]
@@ -4303,14 +4525,28 @@ with tab3:
                 key=f"syn_{qno}"
             )
 
-            st.markdown("### 五、本次整合建議稿（人工可修改）")
+            st.markdown("### 五、字詞查證紀錄")
+            st.caption(
+                "只要詳解牽涉字詞義，固定依序查證：①教育部《國語辭典簡編本》→"
+                "②教育部《重編國語辭典修訂本》→③三家出版社。"
+            )
+            if f"lex_{qno}" not in st.session_state:
+                st.session_state[f"lex_{qno}"] = q.lexical_verification
+            q.lexical_verification = st.text_area(
+                "字詞查證紀錄",
+                height=130,
+                key=f"lex_{qno}",
+                placeholder="字詞｜採用來源｜適用義項／依義項整理｜必要說明"
+            )
+
+            st.markdown("### 六、本次整合建議稿（人工可修改）")
             st.caption(
                 "正常流程：上傳 ChatGPT 完成稿 JSON 後，三家比較筆記、建議詳解、教學重點、"
                 "建議教學步驟與筆記策略會直接帶入；教師只需檢查與修改。"
                 "下方「產生規則式整合初稿」僅供沒有 ChatGPT 完成稿時備用，正常情況不需按。"
             )
             if st.session_state.pop(f"chatgpt_full_import_notice_{qno}", False):
-                st.success("已完整匯入 ChatGPT 完成稿：能力類型建議＋三家比較筆記＋四項教材內容。可直接人工校訂。")
+                st.success("已完整匯入 ChatGPT 完成稿：能力類型建議＋三家比較筆記＋字詞查證＋四項教材內容。可直接人工校訂。")
 
             # Apply saved annual draft if available and the fields are still empty.
             saved = refdb.get("drafts", {}).get(str(q.source_no), {})
