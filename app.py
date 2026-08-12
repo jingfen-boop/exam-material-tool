@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.3 圖像題教師框完整整合版"
+APP_VERSION = "Web v6.12.4 歷年同題型摘錄精準版"
 
 # -----------------------------
 # Models
@@ -2375,28 +2375,129 @@ def _publisher_analysis_only(block: str) -> str:
                 return tail
     return block
 
+def _history_question_blocks(raw: str):
+    """Split an internal teacher-edition file into question-level blocks.
+
+    The old implementation searched the first category word in the whole DOCX
+    text and then displayed a large surrounding excerpt. That could expose most
+    of the booklet instead of the matching historical question.
+
+    This splitter uses the per-question metadata marker such as
+    「112會考-30.75字詞辨識」 to isolate one historical question at a time.
+    """
+    raw = _normalize_reference_text(raw or "")
+    if not raw:
+        return []
+
+    cats = [c for c in ABILITY_OPTIONS if c and c != "其他"]
+    cat_alt = "|".join(re.escape(c) for c in cats)
+
+    # Metadata produced in the historical teacher editions, e.g.
+    # 112會考-30.75字詞辨識 / 114 會考-12.83推論理解
+    meta_re = re.compile(
+        rf"(?P<year>\d{{3}})\s*會考\s*-\s*(?P<qno>\d{{1,2}})\s*"
+        rf"(?P<rate>\d+(?:\.\d+)?)?\s*(?P<category>{cat_alt})"
+    )
+
+    metas = list(meta_re.finditer(raw))
+    if not metas:
+        return []
+
+    # Candidate starts for a question. Historical teacher files usually have:
+    # （B）3. ... / (C) 12. ... / 3. ...
+    qstart_re = re.compile(
+        r"(?m)^[ \t]*"
+        r"(?:[（(][ \t]*[A-DＡ-Ｄ]?[ \t]*[）)][ \t]*)?"
+        r"(?P<num>\d{1,2})[\.、．][ \t]*"
+    )
+    qstarts = list(qstart_re.finditer(raw))
+
+    blocks = []
+    seen_ranges = set()
+    for meta in metas:
+        pos = meta.start()
+
+        # Prefer the nearest preceding question-start whose number matches
+        # the metadata source question number.
+        qno = int(meta.group("qno"))
+        preceding = [m for m in qstarts if m.start() <= pos]
+        matching = [m for m in preceding if int(m.group("num")) == qno]
+        start_match = matching[-1] if matching else (preceding[-1] if preceding else None)
+
+        if start_match:
+            start = start_match.start()
+        else:
+            # Structural fallback: keep a compact window, never the whole file.
+            start = max(0, pos - 320)
+
+        # End at the next detected question start after this metadata.
+        following = [m for m in qstarts if m.start() > pos]
+        end = following[0].start() if following else len(raw)
+
+        # Guard against malformed extraction swallowing the rest of a booklet.
+        if end - start > 6500:
+            teach = raw.find("【教學步驟】", pos)
+            if teach >= 0 and teach - pos < 4200:
+                next_after_teach = next((m.start() for m in qstarts if m.start() > teach), None)
+                end = next_after_teach or min(len(raw), teach + 2200)
+            else:
+                end = min(len(raw), pos + 3000)
+
+        key = (start, end)
+        if key in seen_ranges:
+            continue
+        seen_ranges.add(key)
+
+        block = raw[start:end].strip()
+        if block:
+            blocks.append({
+                "year": meta.group("year"),
+                "qno": str(qno),
+                "category": meta.group("category"),
+                "text": block,
+            })
+    return blocks
+
+
 def _history_examples_for_category(refdb, category: str, limit=6):
+    """Return ONLY historical question blocks matching the selected ability type."""
     if not category:
         return []
+
+    aliases = {category}
+    if category == "表層文意理解":
+        aliases.add("表層文意")
+
     out = []
-    for source, raw in refdb.get("history_raw", {}).items():
-        keys = [category]
-        if category == "表層文意理解":
-            keys.append("表層文意")
-        positions = [raw.find(k) for k in keys if raw.find(k) >= 0]
-        if not positions:
+    for source, raw in (refdb.get("history_raw", {}) or {}).items():
+        blocks = _history_question_blocks(raw)
+
+        if blocks:
+            for b in blocks:
+                bcat = b.get("category", "")
+                if not any(a == bcat or a in bcat for a in aliases):
+                    continue
+                label = f"{source}｜歷年原第{b.get('qno','?')}題｜{bcat}"
+                out.append((label, b["text"]))
+                if len(out) >= limit:
+                    return out
             continue
-        pos = min(positions)
-        teach = raw.find("【教學步驟】", pos)
-        if teach >= 0 and teach - pos < 5000:
-            start = max(0, pos - 450)
-            end = min(len(raw), teach + 2200)
-        else:
-            start = max(0, pos - 450)
-            end = min(len(raw), pos + 2400)
-        out.append((source, raw[start:end].strip()))
-        if len(out) >= limit:
-            break
+
+        # Backward-compatible fallback for old reference packages whose text
+        # cannot be structurally split. Still show only a compact category
+        # neighborhood rather than most of the source document.
+        positions = []
+        for key in aliases:
+            positions.extend(m.start() for m in re.finditer(re.escape(key), raw))
+        for pos in sorted(set(positions)):
+            start = max(0, pos - 280)
+            end = min(len(raw), pos + 1800)
+            excerpt = raw[start:end].strip()
+            if excerpt:
+                out.append((source + "｜同能力類型摘錄", excerpt))
+                if len(out) >= limit:
+                    return out
+
     return out
 
 def _historical_category_evidence(refdb, per_category=2):
@@ -4710,9 +4811,10 @@ with tab3:
                     key=f"strategy_preview_{qno}"
                 )
                 examples = _history_examples_for_category(refdb, q.category)
-                with st.expander(f"查看歷年原教師版摘錄（{len(examples)} 則）", expanded=False):
+                with st.expander(f"查看歷年同題型教師版摘錄（{len(examples)} 題）", expanded=False):
+                    st.caption("只顯示與本題目前「能力類型」相同的歷年題目，不再列出整份歷年題本。")
                     if not examples:
-                        st.caption("目前年度參考包內沒有找到同能力類型文字。")
+                        st.caption("目前年度參考包內沒有找到同能力類型的歷年題目。")
                     for source, excerpt in examples:
                         st.markdown(f"**{source}**")
                         st.text_area(
