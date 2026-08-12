@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.2 圖像題題號真正一致版"
+APP_VERSION = "Web v6.12.3 圖像題教師框完整整合版"
 
 # -----------------------------
 # Models
@@ -1126,24 +1126,10 @@ def add_full_image_exam_question(doc, q: Question, display_no: int, teacher=Fals
         add_meta_runs(pm, year, q.source_no, q.pass_rate, q.category)
 
     if teacher:
-        p = doc.add_paragraph()
-        r = p.add_run("解析：\n")
-        set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(_clean_word_text(q.explanation or "（待補）"))
-        set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
-
-        if q.teaching_focus.strip():
-            p = doc.add_paragraph()
-            r = p.add_run("【教學重點】：\n")
-            set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
-            r2 = p.add_run(_clean_word_text(q.teaching_focus))
-            set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
-
-        p = doc.add_paragraph()
-        r = p.add_run("【教學步驟】：\n")
-        set_eastasia(r, "標楷體"); r.bold = False; r.font.size = Pt(12); r.font.color.rgb = RGBColor(255,0,0)
-        r2 = p.add_run(_clean_word_text(q.teaching or "（待補）"))
-        set_eastasia(r2, "標楷體"); r2.font.size = Pt(12); r2.font.color.rgb = RGBColor(255,0,0)
+        # Use exactly the same historical teacher-content box as ordinary questions.
+        # This restores the thin black outer border for full-image questions (e.g. Q3)
+        # and also keeps 教學重點／教學步驟／筆記策略／筆記表格 in one consistent block.
+        _add_legacy_teacher_box(doc, q)
 
 
 
