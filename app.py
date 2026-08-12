@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.7 教育部辭典優先查證版"
+APP_VERSION = "Web v6.8 閱讀題組原題幹版"
 
 # -----------------------------
 # Models
@@ -1211,6 +1211,39 @@ def _wrap_body_elements_in_keep_table(doc, start_index: int):
     else:
         body.append(tbl)
 
+def _add_official_group_intro(doc, q: Question) -> bool:
+    """Insert the original PDF reading-group heading + shared passage once.
+
+    Priority is the original PDF crop because it preserves the exact 会考 layout,
+    including 「請閱讀……並回答24～25題」, poem/article line breaks, tables,
+    punctuation and unusual typography. Returns True when a crop was inserted.
+    """
+    crops = list(q.group_crop_pngs or [])
+    if not crops:
+        return False
+
+    inserted = False
+    for data in crops:
+        if not data:
+            continue
+        try:
+            im = Image.open(io.BytesIO(data))
+            w, h = im.size
+            # Use the full printable width but never enlarge a very narrow crop
+            # excessively. Aspect ratio is always preserved.
+            target_w = 16.0 if w >= 700 else 14.8
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Cm(0)
+            p.paragraph_format.right_indent = Cm(0)
+            p.paragraph_format.space_before = Pt(1)
+            p.paragraph_format.space_after = Pt(2)
+            p.add_run().add_picture(io.BytesIO(data), width=Cm(target_w))
+            inserted = True
+        except Exception:
+            continue
+    return inserted
+
+
 def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
                                show_material=True, year=None):
     material_text = _clean_word_text(q.material)
@@ -1473,7 +1506,21 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
         else:
             show_material = False
 
+        # Reading groups must begin with the COMPLETE official group stem/material
+        # above the first child question. Prefer the original PDF crop so the
+        # heading, line breaks and typography match the actual 会考 source.
+        # If no crop is available (e.g. an older saved project), fall back to the
+        # editable extracted group_intro/material text below.
+        used_official_group_crop = False
+        if group_key and show_material:
+            used_official_group_crop = _add_official_group_intro(doc, q)
+
         if mode == "整題圖像":
+            if group_key and show_material and not used_official_group_crop and material_key:
+                pmat = doc.add_paragraph()
+                _set_body_paragraph_format(pmat, before=1, after=2)
+                rmat = pmat.add_run(material_key)
+                _set_run_word_style(rmat, size=13)
             add_full_image_exam_question(
                 doc, q, i, teacher=teacher, year=year
             )
@@ -1484,7 +1531,7 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
             start_index = list(body).index(sectPr) if sectPr is not None else len(list(body))
             add_editable_exam_question(
                 doc, q, i, teacher=teacher,
-                show_material=show_material, year=year
+                show_material=(show_material and not used_official_group_crop), year=year
             )
             if keep_short:
                 _wrap_body_elements_in_keep_table(doc, start_index)
@@ -4051,6 +4098,19 @@ with tab2:
             q.group_id for q in qs
             if q.selected and (q.group_id or "").strip()
         }
+        missing_group_intro = []
+        for gid in selected_group_ids:
+            members = [q for q in qs if q.selected and (q.group_id or "").strip() == gid]
+            if members:
+                first = sorted(members, key=lambda x: x.source_no)[0]
+                if not (first.group_crop_pngs or []) and not (first.group_intro or first.material or "").strip():
+                    missing_group_intro.append(gid)
+        if missing_group_intro:
+            st.warning(
+                "以下題組缺少『題組頂端題幹／共用材料』，Word 無法還原原會考題組版面："
+                + "、".join(sorted(missing_group_intro))
+                + "。請回到題目結構校對補入，或重新以原 PDF 建立題庫。"
+            )
         for q in qs:
             if q.group_id and q.group_id in selected_group_ids:
                 q.selected = True
