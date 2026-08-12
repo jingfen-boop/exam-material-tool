@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.7 批次 ChatGPT 整合工作流"
+APP_VERSION = "Web v5.8 批次回覆寬鬆辨識＋匯入預檢"
 
 # -----------------------------
 # Models
@@ -2664,31 +2664,130 @@ def _build_batch_chatgpt_package(refdb, questions):
     return header + "\n\n" + "\n\n".join(parts)
 
 
+def _normalize_batch_heading(s):
+    s = (s or "").strip()
+    s = re.sub(r"^[#>*\-\s]+", "", s)
+    s = s.replace("：", ":")
+    return s.strip()
+
+
+def _extract_flexible_sections(body):
+    """Accept bracket headings, Markdown headings, bold headings, and plain headings."""
+    aliases = {
+        "三家比較筆記": ["三家比較筆記", "三家比較", "出版社比較筆記", "出版社比較"],
+        "建議詳解": ["建議詳解", "詳解"],
+        "教學重點": ["教學重點"],
+        "建議教學步驟": ["建議教學步驟", "教學步驟"],
+        "筆記策略": ["筆記策略"],
+    }
+
+    positions = []
+    for canonical, names in aliases.items():
+        for name in names:
+            patterns = [
+                rf"【\s*{re.escape(name)}\s*】",
+                rf"(?m)^\s*#{1,6}\s*{re.escape(name)}\s*[:：]?\s*$",
+                rf"(?m)^\s*\*\*\s*{re.escape(name)}\s*[:：]?\s*\*\*\s*$",
+                rf"(?m)^\s*{re.escape(name)}\s*[:：]\s*$",
+            ]
+            for pat in patterns:
+                for m in re.finditer(pat, body):
+                    positions.append((m.start(), m.end(), canonical))
+    if not positions:
+        return {}, "找不到五個內容標題。"
+
+    # Keep earliest occurrence for each canonical heading, then sort by position.
+    earliest = {}
+    for s, e, c in positions:
+        if c not in earliest or s < earliest[c][0]:
+            earliest[c] = (s, e, c)
+    ordered = sorted(earliest.values(), key=lambda x: x[0])
+
+    found = {}
+    for i, (s, e, c) in enumerate(ordered):
+        next_s = ordered[i + 1][0] if i + 1 < len(ordered) else len(body)
+        value = body[e:next_s].strip()
+        value = re.sub(r"(?m)^\s*=+\s*【?第\s*\d+\s*題結束】?\s*=+\s*$", "", value).strip()
+        found[c] = value
+
+    required = ["建議詳解", "教學重點", "建議教學步驟"]
+    missing = [x for x in required if not found.get(x)]
+    if missing:
+        return found, "缺少必要區塊：" + "、".join(missing)
+    return found, None
+
+
+def _split_batch_question_blocks(text, valid_nos):
+    """Split ChatGPT output using several common question-heading formats."""
+    valid = {str(x) for x in valid_nos}
+    candidates = []
+
+    patterns = [
+        # =====【第1題】===== / 【第1題】
+        r"(?m)^\s*=*\s*【\s*第\s*(\d+)\s*題\s*】\s*=*\s*$",
+        # ## 第1題 / ### 第 1 題
+        r"(?m)^\s*#{1,6}\s*第\s*(\d+)\s*題(?:\s*[:：].*)?\s*$",
+        # **第1題** / **第 1 題：...**
+        r"(?m)^\s*\*\*\s*第\s*(\d+)\s*題(?:\s*[:：][^*]*)?\s*\*\*\s*$",
+        # 第1題 / 第 1 題：
+        r"(?m)^\s*第\s*(\d+)\s*題(?:\s*[:：].*)?\s*$",
+    ]
+
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            no = m.group(1)
+            if no in valid:
+                # Ignore explicit "第X題結束" markers.
+                line = m.group(0)
+                if "結束" not in line:
+                    candidates.append((m.start(), m.end(), no))
+
+    # Deduplicate headings at same/near position.
+    candidates.sort(key=lambda x: x[0])
+    cleaned = []
+    for item in candidates:
+        if cleaned and abs(item[0] - cleaned[-1][0]) < 5:
+            continue
+        cleaned.append(item)
+
+    blocks = {}
+    for i, (s, e, no) in enumerate(cleaned):
+        next_s = cleaned[i + 1][0] if i + 1 < len(cleaned) else len(text)
+        body = text[e:next_s].strip()
+        # Do not overwrite a longer already-found block.
+        if no not in blocks or len(body) > len(blocks[no]):
+            blocks[no] = body
+    return blocks
+
+
 def _parse_batch_chatgpt_result(text, questions):
-    text=(text or "").strip()
+    text = (text or "").strip()
     if not text:
         return {}, ["尚未貼上 ChatGPT 完整回覆。"]
-    valid={str(q.source_no):q for q in questions}
-    parsed_all={}
-    errors=[]
-    pat=re.compile(r"=====【第\s*(\d+)\s*題】=====(.*?)(?:=====【第\s*\1\s*題結束】=====|(?=====【第\s*\d+\s*題】=====)|\Z)", re.S)
-    matches=list(pat.finditer(text))
-    if not matches:
-        pat=re.compile(r"【第\s*(\d+)\s*題】(.*?)(?=【第\s*\d+\s*題】|\Z)", re.S)
-        matches=list(pat.finditer(text))
-    for m in matches:
-        no=m.group(1)
-        if no not in valid:
-            continue
-        parsed,err=_parse_chatgpt_integrated_result(m.group(2).strip())
+
+    valid = {str(q.source_no): q for q in questions}
+    blocks = _split_batch_question_blocks(text, valid.keys())
+    parsed_all = {}
+    errors = []
+
+    for no, body in blocks.items():
+        sections, err = _extract_flexible_sections(body)
         if err:
             errors.append(f"第{no}題：{err}")
-        else:
-            parsed_all[no]=parsed
-    missing=[str(q.source_no) for q in questions if str(q.source_no) not in parsed_all]
+            continue
+        parsed_all[no] = {
+            "synthesis_notes": sections.get("三家比較筆記", ""),
+            "explanation": sections.get("建議詳解", ""),
+            "teaching_focus": sections.get("教學重點", ""),
+            "teaching": sections.get("建議教學步驟", ""),
+            "note_strategy": sections.get("筆記策略", ""),
+        }
+
+    missing = [str(q.source_no) for q in questions if str(q.source_no) not in parsed_all]
     if missing:
-        errors.append("尚未成功辨識："+"、".join(f"第{x}題" for x in missing))
-    return parsed_all,errors
+        errors.append("尚未成功辨識：" + "、".join(f"第{x}題" for x in missing))
+
+    return parsed_all, errors
 
 
 def _apply_batch_chatgpt_result(parsed_all, questions):
@@ -3844,6 +3943,31 @@ with tab3:
                 placeholder="整份貼上即可；程式會自己辨識每一題及五個內容區塊。"
             )
 
+            pasted_batch = st.session_state.get("batch_chatgpt_result", "")
+            preview_parsed, preview_errors = _parse_batch_chatgpt_result(
+                pasted_batch, batch_questions
+            ) if pasted_batch.strip() else ({}, [])
+
+            if pasted_batch.strip():
+                recognized = [
+                    str(q.source_no) for q in batch_questions
+                    if str(q.source_no) in preview_parsed
+                ]
+                missing_preview = [
+                    str(q.source_no) for q in batch_questions
+                    if str(q.source_no) not in preview_parsed
+                ]
+                st.markdown("**匯入前預檢**")
+                st.metric("已辨識題數", f"{len(recognized)} / {len(batch_questions)}")
+                if recognized:
+                    st.success("已辨識：" + "、".join(f"第{x}題 ✓" for x in recognized))
+                if missing_preview:
+                    st.warning("尚未辨識：" + "、".join(f"第{x}題" for x in missing_preview))
+                if preview_errors:
+                    with st.expander("查看辨識提醒", expanded=False):
+                        for err in preview_errors:
+                            st.write("• " + err)
+
             def _import_batch_chatgpt_callback():
                 parsed_all, errors = _parse_batch_chatgpt_result(
                     st.session_state.get("batch_chatgpt_result", ""), batch_questions
@@ -3854,15 +3978,17 @@ with tab3:
                 st.session_state["batch_import_errors"] = errors
 
             st.button(
-                "步驟 4｜⬇️ 一次匯入全部題目的詳解與教學步驟",
+                "步驟 4｜⬇️ 匯入已成功辨識的全部題目",
                 key="import_batch_chatgpt_result",
                 on_click=_import_batch_chatgpt_callback,
-                type="primary", use_container_width=True
+                type="primary",
+                use_container_width=True,
+                disabled=not bool(preview_parsed),
             )
 
             if "batch_import_count" in st.session_state:
-                count=st.session_state.pop("batch_import_count")
-                errs=st.session_state.pop("batch_import_errors", [])
+                count = st.session_state.pop("batch_import_count")
+                errs = st.session_state.pop("batch_import_errors", [])
                 if count:
                     st.success(f"已成功匯入 {count} 題。下方逐題欄位只需檢查與微調。")
                 if errs:
