@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.9 筆記策略表格實作版"
+APP_VERSION = "Web v6.11 最新需求整合校正版"
 
 # -----------------------------
 # Models
@@ -542,6 +542,9 @@ def _question_structure_status(q: Question) -> str:
         filled = len([v for v in q.options.values() if (v or "").strip()])
         if filled < 4:
             issues.append(f"選項{filled}/4")
+    if (q.group_id or "").strip():
+        if not (q.group_intro or "").strip() and not (q.material or "").strip() and not q.group_crop_pngs:
+            issues.append("缺題組共用題幹")
     if not q.answer:
         issues.append("缺答案")
     if q.pass_rate is None:
@@ -1269,6 +1272,143 @@ def _wrap_body_elements_in_keep_table(doc, start_index: int):
     else:
         body.append(tbl)
 
+
+def _group_heading_template(q: Question, members, display_numbers):
+    """Preserve official wording (詩作/短文/資料…) and replace source qnos with booklet qnos."""
+    candidates=[]
+    for x in members:
+        for raw in (getattr(x, "group_intro", ""), getattr(x, "material", "")):
+            raw=_clean_word_text(raw or "").strip()
+            if raw:
+                candidates.append(raw)
+
+    original_heading=""
+    pat=re.compile(r"(請閱讀[^\n]*?並回答\s*\d{1,2}\s*[～~\-－至]\s*\d{1,2}\s*題[：:]?)")
+    for raw in candidates:
+        m=pat.search(raw)
+        if m:
+            original_heading=m.group(1).strip()
+            break
+
+    a=display_numbers[0] if display_numbers else 1
+    b=display_numbers[-1] if display_numbers else a
+    range_text=f"{a}～{b}題" if a != b else f"{a}題"
+    if original_heading:
+        return re.sub(
+            r"回答\s*\d{1,2}\s*[～~\-－至]\s*\d{1,2}\s*題",
+            f"回答{range_text}",
+            original_heading
+        )
+    return f"請閱讀以下資料，並回答{range_text}："
+
+
+def _strip_heading_line_from_group_crop(data):
+    """Remove only the old source-number heading from top of a group crop."""
+    try:
+        im=Image.open(io.BytesIO(data)).convert("RGB")
+        gray=im.convert("L")
+        w,h=gray.size
+        if h < 40:
+            return data
+        max_y=max(25,min(h,int(h*0.30)))
+        ink=[]
+        for y in range(max_y):
+            count=sum(1 for x in range(w) if gray.getpixel((x,y)) < 205)
+            ink.append(count)
+        threshold=max(3,int(w*0.0025))
+        first=next((y for y,v in enumerate(ink) if v>=threshold),None)
+        if first is None:
+            return data
+        blank_run=0
+        seen_ink=False
+        cut=None
+        for y in range(first,max_y):
+            if ink[y]>=threshold:
+                seen_ink=True
+                blank_run=0
+            elif seen_ink:
+                blank_run+=1
+                if blank_run>=7:
+                    cut=y+1
+                    break
+        if cut is None or cut>=h-20:
+            return data
+        cropped=im.crop((0,cut,w,h))
+        buf=io.BytesIO()
+        cropped.save(buf,format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return data
+
+
+def _strip_group_heading_from_text(raw):
+    raw=_clean_word_text(raw or "").strip()
+    if not raw:
+        return ""
+    lines=raw.splitlines()
+    pat=re.compile(r"請閱讀.*?並回答\s*\d{1,2}\s*[～~\-－至]\s*\d{1,2}\s*題")
+    kept=[]
+    removed=False
+    for line in lines:
+        if not removed and pat.search(line):
+            removed=True
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _add_group_header_and_material(doc, q: Question, members, display_numbers):
+    """Render complete reading-set context before the first subquestion.
+
+    Official heading wording is preserved, but question numbers are updated to
+    the NEW booklet numbering. Original PDF crops remain the preferred material
+    source so poems, tables, figures and spacing stay source-faithful.
+    """
+    heading=_group_heading_template(q,members,display_numbers)
+    p=doc.add_paragraph()
+    _set_body_paragraph_format(p,before=2,after=2)
+    r=p.add_run(heading)
+    _set_run_word_style(r,font="標楷體",size=13)
+
+    crops=[]
+    for x in members:
+        if getattr(x,"group_crop_pngs",None):
+            crops=list(x.group_crop_pngs)
+            if crops:
+                break
+    if crops:
+        for idx,data in enumerate(crops):
+            clean_data=_strip_heading_line_from_group_crop(data) if idx==0 else data
+            ip=doc.add_paragraph()
+            ip.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            _set_body_paragraph_format(ip,after=2)
+            try:
+                im=Image.open(io.BytesIO(clean_data))
+                w,h=im.size
+                target_w=15.8 if w>=800 else 14.8
+                ip.add_run().add_picture(io.BytesIO(clean_data),width=Cm(target_w))
+            except Exception:
+                pass
+        return
+
+    candidates=[]
+    for x in members:
+        for value in (getattr(x,"group_intro",""),getattr(x,"material","")):
+            value=_strip_group_heading_from_text(value)
+            if value:
+                candidates.append(value)
+    if candidates:
+        material=max(candidates,key=len)
+        p=doc.add_paragraph()
+        _set_body_paragraph_format(p,before=0,after=3)
+        lines=material.splitlines()
+        for li,line in enumerate(lines):
+            if li:
+                p.add_run().add_break()
+            rr=p.add_run(line)
+            _set_run_word_style(rr,font="標楷體",size=13)
+
+
 def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
                                show_material=True, year=None):
     material_text = _clean_word_text(q.material)
@@ -1512,6 +1652,7 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
     last_group_key = None
     last_material = None
     entered_reading_section = False
+    display_no_by_source = {q.source_no: i for i, q in enumerate(selected, start=1)}
 
     for i, q in enumerate(selected, start=1):
         mode = _effective_render_mode(q)
@@ -1523,9 +1664,22 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
             _add_exam_section_heading(doc, "貳、閱讀題組")
             entered_reading_section = True
 
-        # Shared reading material is shown once per group.
+        # IMPORTANT: for a reading set, print the COMPLETE common stem/material
+        # immediately before its first selected child. Prefer the original PDF crop
+        # so the Word output follows the source-exam presentation as closely as possible.
+        if group_key and group_key != last_group_key:
+            members = sorted(
+                [x for x in selected if (x.group_id or "").strip() == group_key],
+                key=lambda x: x.source_no
+            )
+            _add_group_header_and_material(
+                doc, q, members,
+                [display_no_by_source[x.source_no] for x in members]
+            )
+
+        # Group common material is handled above, never inside the first child question.
         if group_key:
-            show_material = (group_key != last_group_key)
+            show_material = False
         elif material_key:
             show_material = (material_key != last_material)
         else:
@@ -1575,12 +1729,30 @@ def make_exam_layout_docx(questions: List[Question], year: int, title_suffix: st
     r.bold = True
 
     selected = [q for q in questions if q.selected]
+    display_no_by_source = {q.source_no: i for i, q in enumerate(selected, start=1)}
+    last_group_key = None
+    entered_reading_section = False
+    for i, q in enumerate(selected, start=1):
+        group_key = (q.group_id or "").strip()
+        if group_key and not entered_reading_section:
+            _add_exam_section_heading(doc, "貳、閱讀題組")
+            entered_reading_section = True
+        if group_key and group_key != last_group_key:
+            members = sorted(
+                [x for x in selected if (x.group_id or "").strip() == group_key],
+                key=lambda x: x.source_no
+            )
+    selected = [q for q in questions if q.selected]
+    display_no_by_source = {q.source_no: i for i, q in enumerate(selected, start=1)}
+    last_group_key = None
+    entered_reading_section = False
     for i, q in enumerate(selected, start=1):
         add_source_crop_question(
             doc, q, i, teacher=teacher,
             show_new_number=show_new_number,
             show_source_meta=show_source_meta
         )
+        last_group_key = group_key or None
 
     out = io.BytesIO()
     _remove_empty_body_paragraphs(doc)
@@ -1596,10 +1768,26 @@ def make_docx(questions: List[Question], year: int, title_suffix: str, teacher=F
     doc.add_paragraph("壹、單題").runs[0].bold = True
 
     selected = [q for q in questions if q.selected]
+    display_no_by_source = {q.source_no: i for i, q in enumerate(selected, start=1)}
+    last_group_key = None
+    entered_reading_section = False
     for i, q in enumerate(selected, start=1):
-        # visual-mode questions retain source crop by default
+        group_key=(q.group_id or "").strip()
+        if group_key and not entered_reading_section:
+            _add_exam_section_heading(doc, "貳、閱讀題組")
+            entered_reading_section=True
+        if group_key and group_key != last_group_key:
+            members=sorted(
+                [x for x in selected if (x.group_id or "").strip()==group_key],
+                key=lambda x:x.source_no
+            )
+            _add_group_header_and_material(
+                doc, q, members,
+                [display_no_by_source[x.source_no] for x in members]
+            )
         use_crop = preserve_visual and q.visual_mode
         add_question(doc, q, i, year, teacher=teacher, use_crop=use_crop)
+        last_group_key=group_key or None
 
     out = io.BytesIO()
     _remove_empty_body_paragraphs(doc)
@@ -2895,6 +3083,9 @@ def _build_chatgpt_analysis_package(refdb, q):
 
 【筆記策略】
 （內容）
+
+【筆記策略表格JSON】
+（若適合表格化，輸出單一 JSON 物件；不適合則輸出 null）
 """
     return package.strip()
 
@@ -2912,6 +3103,7 @@ def _parse_chatgpt_integrated_result(text):
         "教學重點",
         "建議教學步驟",
         "筆記策略",
+        "筆記策略表格JSON",
     ]
 
     found = {}
@@ -2940,6 +3132,10 @@ def _parse_chatgpt_integrated_result(text):
         "teaching_focus": found.get("教學重點", ""),
         "teaching": found.get("建議教學步驟", ""),
         "note_strategy": found.get("筆記策略", ""),
+        "note_strategy_table_json": (
+            "" if found.get("筆記策略表格JSON", "").strip().lower() in ("", "null")
+            else found.get("筆記策略表格JSON", "").strip()
+        ),
     }, None
 
 
@@ -2993,32 +3189,16 @@ def _build_batch_chatgpt_package(refdb, questions):
 1. 每一題都必須完成，不可漏題，也不可把題組中的不同子題合併成同一題。
 2. 「建議詳解」的文風以分析包中的【本團隊歷年同能力類型參考】為最高優先；三家出版社僅作答案依據與資訊交叉確認，不得以任一家出版社作為句型或段落模板。
 3. 必須重新組織每題詳解，不得沿用任一家出版社的敘述順序、句型骨架或大段措辭；除題幹／選項必要引文外，避免出現具辨識度的連續相同說明語句。
-4. 詳解優先採本團隊歷年常見寫法：直接進入文本證據或選項判斷；閱讀題以「由『……』可知……」建立證據與判斷；錯誤選項簡潔說明「文中並未提及……」或指出與文本何處不符；字詞題可逐項辨義；結尾統一「故答案應選(X)。」。不要以「答案(X)。」起筆。
-5. 字詞查證來源與查證過程主要放在「字詞查證紀錄」；「建議詳解」維持本團隊教材語氣，除非辨義需要，不反覆寫辭典全名。
-6. 每題完成後自行檢查：若整段明顯近似翰林、康軒或南一其中一家，必須再次改寫，使結構與語氣回到本團隊歷年詳解風格。
-7. 「建議詳解」必須說清楚答案依據；適合時補充錯誤選項辨析，但不加入與作答無關的教材課次、投影片或延伸知識。
-8. 「建議教學步驟」必須具體、連貫、可操作，不可只寫「讀題、找線索、排除」。
-9. 若資料不足，請在對應欄位明確寫「需人工確認」，不要杜撰。
-10. 「筆記策略」須先判斷是否適合表格化。若適合，必須同時提供「筆記策略表格」物件，直接寫出欄名與每列內容；若不適合，填 null。
-11. 表格設計要優先模仿本團隊歷年教師版，例如「詞語／意義」、「標點符號／用法／造句（或例句）」、「六書／造字原則／例子」，或閱讀題可用「文本／關鍵證據／判斷」等真正有助學習的結構。
-7. 回覆時「只能輸出一個 JSON 物件」，不要加前言、後記、Markdown 說明或 ```json 程式碼圍欄。
-8. question_no 必須使用阿拉伯數字題號，並與本次題號完全一致。
-9. 能力類型請優先參照分析包中的「本團隊歷年能力類型分類證據」與既有分類名稱，不要任意創造新分類。
-10. 每題先提供三個能力分類欄位：
-   建議能力類型、備選能力類型、能力類型判斷理由。
-   - 「建議能力類型」選最能代表本題主要認知任務的既有類別。
-   - 題目若合理跨類型，才填「備選能力類型」；沒有則留空。
-   - 若歷年資料不足以支持分類，理由中請明確標示「需人工確認」。
-11. 每題另固定包含以下六個內容欄位，欄位名稱不可更改：
-   三家比較筆記、字詞查證紀錄、建議詳解、教學重點、建議教學步驟、筆記策略。
-12. 只要任何輸出牽涉字義、詞義、成語義、文言詞義或語詞用法，必須實際查證：
-   ①教育部《國語辭典簡編本》→②教育部《重編國語辭典修訂本》→③三家出版社。
-   只有上一順位查無詞目或無符合本題語境的義項，才能使用下一順位。
-   若採②或③，須在「字詞查證紀錄」說明上一順位不適用的原因。
-   若無法實際查證，明寫「需人工查證」，不得憑模型記憶杜撰。
-   若本題無需字詞解釋，填「本題無需字詞查證」。
-13. 必須依本題語境選義項。直接引用教育部釋義時不得任意改寫；
-   若為教材可讀性而轉述，標示「依教育部辭典義項整理」。
+4. 詳解優先採本團隊歷年常見寫法：直接進入文本證據或選項判斷；閱讀題常以「由『……』可知……」建立證據與判斷；錯誤選項簡潔說明與文本何處不符；字詞題可逐項辨義；結尾使用「故答案應選(X)。」。不要以「答案(X)。」起筆。
+5. 字詞查證來源與查證過程主要放在「字詞查證紀錄」；詳解維持本團隊教材語氣。
+6. 每題完成後自行檢查出版社相似度；若整段明顯近似任一家出版社，必須再次改寫。
+7. 「建議教學步驟」必須具體、連貫、可操作，不可只寫「讀題、找線索、排除」。
+8. 能力類型優先參照本團隊歷年分類證據；提供「建議能力類型、備選能力類型、能力類型判斷理由」，最終仍由教師人工確認。
+9. 只要輸出牽涉字義、詞義、成語義、文言詞義或語詞用法，查證順序固定為：①教育部《國語辭典簡編本》→②教育部《重編國語辭典修訂本》→③三家出版社。上一順位無適用資料才能用下一順位；無法實查時寫「需人工查證」，不得杜撰。
+10. 「筆記策略」先判斷是否真的適合表格化。適合時，同時輸出「筆記策略表格」物件，直接寫完整欄名與各列內容；優先參考本團隊歷年「詞語／意義」「標點符號／用法／造句」「六書／造字原則／例子」等形式，閱讀題可設計「文本／關鍵證據／判斷」等真正有助學習的表格。不適合則填 null，不要硬做。
+11. 每題固定包含：建議能力類型、備選能力類型、能力類型判斷理由、三家比較筆記、字詞查證紀錄、建議詳解、教學重點、建議教學步驟、筆記策略、筆記策略表格。
+12. 若資料不足，對應欄位明確寫「需人工確認」，不要杜撰。
+13. 回覆只能輸出一個 JSON 物件，不要加前言、後記、Markdown 或程式碼圍欄；question_no 必須與本次原題號完全一致。
 
 JSON 結構範例：
 {json.dumps(schema_example, ensure_ascii=False, indent=2)}
@@ -3139,7 +3319,7 @@ def _parse_batch_chatgpt_result(text, questions):
 
 
 def _apply_batch_chatgpt_result(parsed_all, questions):
-    """Apply all 8 ChatGPT fields to the model.
+    """Apply the full ChatGPT draft fields to the model.
 
     Important Streamlit rule:
     Do NOT write directly to widget-owned session_state keys here.
@@ -3161,7 +3341,7 @@ def _apply_batch_chatgpt_result(parsed_all, questions):
         if not (q.category or "").strip() and q.suggested_category:
             q.category = q.suggested_category
 
-        # The five content fields are the ChatGPT finished draft and must be
+        # The content fields are the ChatGPT finished draft and must be
         # imported directly instead of waiting for the rule-based backup button.
         q.synthesis_notes = parsed.get("synthesis_notes", "")
         q.lexical_verification = parsed.get("lexical_verification", "")
