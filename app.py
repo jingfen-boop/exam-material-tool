@@ -20,7 +20,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v5.6 ChatGPT 分析包＋整合稿匯入工作流"
+APP_VERSION = "Web v5.7 批次 ChatGPT 整合工作流"
 
 # -----------------------------
 # Models
@@ -2622,6 +2622,97 @@ def _parse_chatgpt_integrated_result(text):
     }, None
 
 
+
+# -----------------------------
+# v5.7 Batch ChatGPT workflow
+# -----------------------------
+def _selected_questions_for_batch():
+    return [q for q in list(st.session_state.get("questions", []) or [])
+            if getattr(q, "selected", False)]
+
+
+def _build_batch_chatgpt_package(refdb, questions):
+    parts = []
+    for q in questions:
+        parts.append(
+            f"====================\n【題目識別】第{q.source_no}題\n====================\n"
+            + _build_chatgpt_analysis_package(refdb, q)
+        )
+    header = """你現在要一次處理本次教材已選取的多題「國中教育會考國文教師版」內容。
+請逐題完成，不可漏題，也不要合併不同題目的內容。
+
+每題請嚴格使用以下格式：
+=====【第X題】=====
+【三家比較筆記】
+（內容）
+【建議詳解】
+（內容）
+【教學重點】
+（內容）
+【建議教學步驟】
+（內容）
+【筆記策略】
+（內容）
+=====【第X題結束】=====
+
+請參照本團隊歷年教師版的詳略、語氣、結構與教學步驟寫法，針對今年新題重新撰寫。
+詳解需說清楚答案依據；教學步驟需具體可操作；不要只拼接出版社原文。
+若來源不足，請標示「需人工確認」。請保留每題起訖標記供程式自動匯入。
+
+以下為本次全部題目資料：
+"""
+    return header + "\n\n" + "\n\n".join(parts)
+
+
+def _parse_batch_chatgpt_result(text, questions):
+    text=(text or "").strip()
+    if not text:
+        return {}, ["尚未貼上 ChatGPT 完整回覆。"]
+    valid={str(q.source_no):q for q in questions}
+    parsed_all={}
+    errors=[]
+    pat=re.compile(r"=====【第\s*(\d+)\s*題】=====(.*?)(?:=====【第\s*\1\s*題結束】=====|(?=====【第\s*\d+\s*題】=====)|\Z)", re.S)
+    matches=list(pat.finditer(text))
+    if not matches:
+        pat=re.compile(r"【第\s*(\d+)\s*題】(.*?)(?=【第\s*\d+\s*題】|\Z)", re.S)
+        matches=list(pat.finditer(text))
+    for m in matches:
+        no=m.group(1)
+        if no not in valid:
+            continue
+        parsed,err=_parse_chatgpt_integrated_result(m.group(2).strip())
+        if err:
+            errors.append(f"第{no}題：{err}")
+        else:
+            parsed_all[no]=parsed
+    missing=[str(q.source_no) for q in questions if str(q.source_no) not in parsed_all]
+    if missing:
+        errors.append("尚未成功辨識："+"、".join(f"第{x}題" for x in missing))
+    return parsed_all,errors
+
+
+def _apply_batch_chatgpt_result(parsed_all, questions):
+    by_no={str(q.source_no):q for q in questions}
+    count=0
+    for no,parsed in parsed_all.items():
+        q=by_no.get(str(no))
+        if q is None:
+            continue
+        qno=q.source_no
+        st.session_state[f"syn_{qno}"]=parsed["synthesis_notes"]
+        st.session_state[f"exp_{qno}"]=parsed["explanation"]
+        st.session_state[f"focus_{qno}"]=parsed["teaching_focus"]
+        st.session_state[f"teach_{qno}"]=parsed["teaching"]
+        st.session_state[f"note_{qno}"]=parsed["note_strategy"]
+        q.synthesis_notes=parsed["synthesis_notes"]
+        q.explanation=parsed["explanation"]
+        q.teaching_focus=parsed["teaching_focus"]
+        q.teaching=parsed["teaching"]
+        q.note_strategy=parsed["note_strategy"]
+        count+=1
+    return count
+
+
 # -----------------------------
 # v5.1 Annual project persistence
 # -----------------------------
@@ -3720,6 +3811,65 @@ with tab3:
             )
 
         _sync_group_widget_state_to_questions(st.session_state.questions)
+
+        batch_questions = _selected_questions_for_batch()
+        if batch_questions:
+            st.subheader("🚀 本次選題整批 ChatGPT 整合")
+            st.caption(
+                "最省事的流程：一次複製全部已選題目 → 貼給 ChatGPT → "
+                "把 ChatGPT 完整回覆一次貼回來 → 按一次匯入。"
+                "不需要逐題複製，也不需要自己拆成不同欄位。"
+            )
+            batch_ids = "、".join(f"第{q.source_no}題" for q in batch_questions)
+            st.info(f"目前整批處理 {len(batch_questions)} 題：{batch_ids}")
+
+            batch_package = _build_batch_chatgpt_package(refdb, batch_questions)
+            with st.expander("步驟 1｜📋 複製本次全部題目的分析包", expanded=False):
+                st.text_area("整批分析包", value=batch_package, height=480,
+                             key="batch_chatgpt_package")
+                st.download_button(
+                    "⬇️ 下載整批分析包 TXT",
+                    data=batch_package.encode("utf-8"),
+                    file_name=f"{int(st.session_state.year)}_本次選題_ChatGPT整批分析包.txt",
+                    mime="text/plain", key="download_batch_chatgpt_package",
+                    use_container_width=True
+                )
+
+            st.markdown("**步驟 2｜把整份分析包貼到 ChatGPT。**")
+            st.markdown("**步驟 3｜把 ChatGPT 的完整回覆原封不動貼到下面。不要自己拆欄位。**")
+            st.text_area(
+                "貼上 ChatGPT 完整回覆",
+                height=400,
+                key="batch_chatgpt_result",
+                placeholder="整份貼上即可；程式會自己辨識每一題及五個內容區塊。"
+            )
+
+            def _import_batch_chatgpt_callback():
+                parsed_all, errors = _parse_batch_chatgpt_result(
+                    st.session_state.get("batch_chatgpt_result", ""), batch_questions
+                )
+                st.session_state["batch_import_count"] = _apply_batch_chatgpt_result(
+                    parsed_all, batch_questions
+                )
+                st.session_state["batch_import_errors"] = errors
+
+            st.button(
+                "步驟 4｜⬇️ 一次匯入全部題目的詳解與教學步驟",
+                key="import_batch_chatgpt_result",
+                on_click=_import_batch_chatgpt_callback,
+                type="primary", use_container_width=True
+            )
+
+            if "batch_import_count" in st.session_state:
+                count=st.session_state.pop("batch_import_count")
+                errs=st.session_state.pop("batch_import_errors", [])
+                if count:
+                    st.success(f"已成功匯入 {count} 題。下方逐題欄位只需檢查與微調。")
+                if errs:
+                    st.warning("；".join(errs))
+            st.divider()
+            st.caption("以下為逐題檢查／微調區。一般不需要再逐題貼 ChatGPT 內容。")
+
         selected_nums = [q.source_no for q in st.session_state.questions if q.selected]
         choices = selected_nums or [q.source_no for q in st.session_state.questions]
         qno = st.selectbox("選擇題目", choices, key="workbench_qno")
@@ -3797,7 +3947,7 @@ with tab3:
                             label_visibility="collapsed"
                         )
 
-            st.markdown("### 三、交給 ChatGPT 深度整合（免 API）")
+            st.markdown("### 三、單題 ChatGPT 重做（選用）")
             st.caption(
                 "這裡會把「今年題目＋三家出版社＋本團隊歷年同能力類型寫法＋教學框架」"
                 "整理成一份完整分析包。你可以直接複製到目前的 ChatGPT 對話，"
