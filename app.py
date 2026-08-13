@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.10 語文知識筆記表格固定版"
+APP_VERSION = "Web v6.12.12 圖文混合學生教師共同修正版"
 
 # -----------------------------
 # Models
@@ -522,12 +522,22 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
     return questions, page_images
 
 def _effective_render_mode(q: Question) -> str:
-    if q.render_mode and q.render_mode != "自動":
-        return q.render_mode
+    # Respect explicit modes except for a legacy "可編輯文字" setting that would
+    # suppress source images already detected inside the question.
+    explicit = (q.render_mode or "自動").strip()
+    if explicit in ("圖文混合", "整題圖像"):
+        return explicit
+    if explicit == "可編輯文字":
+        if q.include_image and q.image_pngs:
+            return "圖文混合"
+        return "可編輯文字"
+
     filled = len([v for v in q.options.values() if (v or "").strip()])
     if filled < 4 and q.crop_png:
         return "整題圖像"
-    if q.visual_mode and q.image_pngs:
+    # Independent images are objective evidence of a mixed question; do not
+    # require the old visual_mode flag, which may be stale in legacy project ZIPs.
+    if q.include_image and q.image_pngs:
         return "圖文混合"
     return "可編輯文字"
 
@@ -788,11 +798,13 @@ def _normalize_language_note_table(raw):
     if any(any(bad in col for bad in forbidden) for col in cols):
         return ""
 
-    # Keep genuine language-knowledge tables, but standardize 意義/意思 -> 解釋
-    # for simple lexical two-column notes.
+    # Keep genuine language-knowledge tables.
+    # Only meaning/definition tables are standardized to「詞語／解釋」.
+    # Pronunciation tables such as「詞語／讀音」must keep「讀音」.
     if len(cols) == 2 and first_is_lexical:
         cols[0] = "詞語"
-        cols[1] = "解釋"
+        if second_is_definition:
+            cols[1] = "解釋"
 
     return json.dumps({
         "title": spec.get("title") or "學生課堂即時筆記如下：",
@@ -1505,6 +1517,22 @@ def _add_group_header_and_material(doc, q: Question, members, display_numbers):
             _set_run_word_style(rr,font="標楷體",size=13)
 
 
+def _effective_layout_style(q: Question):
+    """Return an output layout without mutating the user's saved setting."""
+    style = (q.layout_style or "一般直列").strip()
+    mode = _effective_render_mode(q)
+    if mode != "圖文混合" or not q.image_pngs:
+        return style
+
+    # If user explicitly chose an image layout, honor it.
+    if style in ("圖片在右", "圖片在上"):
+        return style
+
+    # Default mixed layout: keep text editable and place source visual centrally.
+    # This is safer for tables/figures than squeezing them into a narrow right cell.
+    return "一般直列"
+
+
 def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
                                show_material=True, year=None):
     material_text = _clean_word_text(q.material)
@@ -1516,7 +1544,7 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
         r = p.add_run(material_text)
         _set_run_word_style(r, size=13)
 
-    style = q.layout_style or "一般直列"
+    style = _effective_layout_style(q)
 
     if style == "圖片在右" and q.include_image and q.image_pngs:
         table = doc.add_table(rows=1, cols=2)
@@ -1556,6 +1584,22 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
             _set_body_paragraph_format(ip, after=0)
             try:
                 ip.add_run().add_picture(io.BytesIO(q.image_pngs[0]), width=Cm(14.8))
+            except Exception:
+                pass
+        elif style not in ("圖片在右", "圖片在上") and q.include_image and q.image_pngs:
+            # v6.12.12: this was the missing branch.
+            # In the default "一般直列" layout the first independent PDF image
+            # must appear between stem and options. Previous versions silently
+            # skipped image_pngs[0], so "圖文混合" looked exactly like plain text.
+            ip = doc.add_paragraph()
+            ip.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            _set_body_paragraph_format(ip, after=0)
+            try:
+                im = Image.open(io.BytesIO(q.image_pngs[0]))
+                w, h = im.size
+                # Keep diagrams/tables readable without oversized tiny icons.
+                width_cm = 14.8 if w >= h else 9.5
+                ip.add_run().add_picture(io.BytesIO(q.image_pngs[0]), width=Cm(width_cm))
             except Exception:
                 pass
 
@@ -1781,6 +1825,10 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
         else:
             show_material = False
 
+        # Student and teacher versions use the SAME question-body renderer.
+        # Teacher differs only by appending the historical explanation/teaching box.
+        # This keeps the intended "editable text + independent source image" mixed
+        # layout in both versions instead of forcing every teacher question to a full crop.
         if mode == "整題圖像":
             add_full_image_exam_question(
                 doc, q, i, teacher=teacher, year=year
@@ -5517,7 +5565,7 @@ with tab4:
 
 
         if output_mode == "可編輯原會考風格（推薦）":
-            st.info("此模式會依每題設定自動混合輸出：一般題用可編輯文字；圖文題用文字＋獨立圖片；特殊版面題可用「整題圖像」；（　）與新的組題題號仍是可編輯文字，題圖會改為正文寬度置於題號下方，不再塞在右欄。")
+            st.info("學生版與教師版現在共用同一套題目版型：一般題使用可編輯文字；偵測到原題圖片／圖表時使用「可編輯文字＋原圖」的圖文混合；只有無法可靠拆解的特殊題才使用整題圖像。教師版另外接解析／教學外框。")
             incomplete = [q.source_no for q in selected if _effective_render_mode(q) != "整題圖像" and len([v for v in q.options.values() if (v or "").strip()]) < 4]
             if incomplete:
                 st.warning("以下非「整題圖像」題目尚未有完整 A–D：" + "、".join(map(str, incomplete)) + "。可補齊文字，或到①題目結構校對改成「整題圖像」。")
