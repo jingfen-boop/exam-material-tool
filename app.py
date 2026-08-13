@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.15 舊解析污染安全修復版"
+APP_VERSION = "Web v6.12.16 圖文右欄寬度安全修復版"
 
 # -----------------------------
 # Models
@@ -1691,13 +1691,46 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
 
     style = _effective_layout_style(q)
 
+    # v6.12.16: only enter the two-column right-image layout when the image is
+    # actually decodable.  A stale/invalid image_pngs entry used to create an empty
+    # right cell while squeezing the whole question into the narrow left cell.
+    right_image_ok = False
     if style == "圖片在右" and q.include_image and q.image_pngs:
+        try:
+            with Image.open(io.BytesIO(q.image_pngs[0])) as _im:
+                _im.verify()
+            right_image_ok = True
+        except Exception:
+            right_image_ok = False
+
+    if style == "圖片在右" and right_image_ok:
         table = doc.add_table(rows=1, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.autofit = False
-        table.columns[0].width = Cm(10.7)
-        table.columns[1].width = Cm(6.0)
         c0, c1 = table.cell(0,0), table.cell(0,1)
+
+        # Set widths on BOTH tblGrid and tcW.  Setting only table.columns[*].width
+        # is not reliably honored by Word, especially after template/project reloads.
+        left_w, right_w = Cm(10.7), Cm(6.0)
+        table.columns[0].width = left_w
+        table.columns[1].width = right_w
+        c0.width = left_w
+        c1.width = right_w
+        for cell, width in ((c0, left_w), (c1, right_w)):
+            tcPr = cell._tc.get_or_add_tcPr()
+            tcW = tcPr.first_child_found_in("w:tcW")
+            if tcW is None:
+                tcW = OxmlElement("w:tcW")
+                tcPr.append(tcW)
+            tcW.set(qn("w:w"), str(int(width.twips)))
+            tcW.set(qn("w:type"), "dxa")
+
+        tblPr = table._tbl.tblPr
+        layout = tblPr.first_child_found_in("w:tblLayout")
+        if layout is None:
+            layout = OxmlElement("w:tblLayout")
+            tblPr.append(layout)
+        layout.set(qn("w:type"), "fixed")
         p = c0.paragraphs[0]
         _set_body_paragraph_format(p, after=0)
         _add_answer_prefix(p, q, display_no, teacher)
@@ -1715,6 +1748,10 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
             borders.append(el)
         tblPr.append(borders)
     else:
+        # Invalid/missing right-side image: restore a normal full-width question
+        # instead of leaving a blank image column that crushes the text.
+        if style == "圖片在右" and not right_image_ok:
+            style = "一般直列"
         p = doc.add_paragraph()
         _set_body_paragraph_format(p, before=1, after=0)
         _add_answer_prefix(p, q, display_no, teacher)
