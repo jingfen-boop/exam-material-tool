@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.12 圖文混合學生教師共同修正版"
+APP_VERSION = "Web v6.12.15 舊解析污染安全修復版"
 
 # -----------------------------
 # Models
@@ -61,6 +61,13 @@ class Question:
     render_mode: str = "自動"
     selected: bool = False
 
+    # v6.12.15: non-destructive backup for legacy PDF-parser contamination repair.
+    # These fields are persisted in project ZIP so a human edit can always be restored.
+    pre_visual_repair_text: str = ""
+    pre_visual_repair_options: Dict[str, str] = None
+    pre_visual_repair_material: str = ""
+    visual_repair_note: str = ""
+
     def __post_init__(self):
         if self.options is None:
             self.options = {}
@@ -68,6 +75,8 @@ class Question:
             self.image_pngs = []
         if self.group_crop_pngs is None:
             self.group_crop_pngs = []
+        if self.pre_visual_repair_options is None:
+            self.pre_visual_repair_options = {}
 
 # -----------------------------
 # PDF parsing
@@ -248,11 +257,14 @@ def _split_inline_option_line(text: str):
     return prefix, pairs
 
 
-def _region_text_and_options(page, y0, y1, qno):
+def _region_text_and_options(page, y0, y1, qno, x_max=None, y_min=None):
     rows = []
+    effective_y0 = y0 if y_min is None else max(y0, y_min)
     for y, x, t, bbox in _all_page_lines(page):
         cy = (bbox[1]+bbox[3])/2
-        if y0 <= cy < y1:
+        if effective_y0 <= cy < y1:
+            if x_max is not None and bbox[0] >= x_max:
+                continue
             if t in {"請翻頁繼續作答", "請不要翻到次頁！"}:
                 continue
             if re.fullmatch(r"\d{1,2}", t) and bbox[1] > page.rect.height - 100:
@@ -315,6 +327,147 @@ def _region_text_and_options(page, y0, y1, qno):
         }
 
     return "\n".join(stem_lines).strip(), options
+
+
+def _render_pdf_region(page, rect, scale=1.8):
+    """Render a PDF region as one source-faithful PNG."""
+    rect = fitz.Rect(rect) & page.rect
+    if rect.width < 8 or rect.height < 8:
+        return b""
+    try:
+        pix = page.get_pixmap(
+            matrix=fitz.Matrix(scale, scale),
+            clip=rect,
+            alpha=False
+        )
+        return pix.tobytes("png")
+    except Exception:
+        return b""
+
+
+def _question_visual_composite(page, y0, y1, qno, stem, options):
+    """Build ONE meaningful visual block for mixed Word output.
+
+    Why this is needed:
+    PDF image extraction alone is insufficient. A visual panel can contain
+    vector text + borders + raster pictures (Q4), or one picture can be split
+    into multiple PDF image blocks (Q10), or a table can be vector/text only
+    with no raster image at all (Q36).
+
+    Returns:
+      visual_pngs, layout_style, cleaned_stem, cleaned_options, visual_mode
+    """
+    region_lines = []
+    for y, x, t, bbox in _all_page_lines(page):
+        cy = (bbox[1] + bbox[3]) / 2
+        if y0 <= cy < y1:
+            region_lines.append((y, x, t, bbox))
+
+    raw_region_text = "\n".join(t for _,_,t,_ in region_lines)
+
+    # Raster/image blocks that physically overlap this question.
+    image_blocks = []
+    try:
+        d = page.get_text("dict")
+        for block in d.get("blocks", []):
+            if block.get("type") != 1:
+                continue
+            br = fitz.Rect(block.get("bbox"))
+            if br.y1 <= y0 or br.y0 >= y1:
+                continue
+            if br.width < 18 or br.height < 14 or br.width * br.height < 700:
+                continue
+            image_blocks.append(br)
+    except Exception:
+        pass
+
+    # --------------------------------------------------
+    # A. "右圖／右表／右列資料" = preserve the entire right panel.
+    # This captures vector text, table borders AND raster pictures as one block.
+    # --------------------------------------------------
+    right_cues = ("右圖", "右表", "右列資料", "右列", "右方資料", "右側資料")
+    has_right_cue = any(cue in raw_region_text for cue in right_cues)
+
+    if has_right_cue:
+        # Right-panel lines normally begin beyond the left question column.
+        right_lines = [
+            (y,x,t,bbox) for y,x,t,bbox in region_lines
+            if bbox[0] >= page.rect.width * 0.46
+        ]
+        right_images = [
+            br for br in image_blocks
+            if br.x1 >= page.rect.width * 0.50
+        ]
+
+        x_candidates = [bbox[0] for _,_,_,bbox in right_lines] + [br.x0 for br in right_images]
+        if x_candidates:
+            panel_x0 = max(page.rect.width * 0.44, min(x_candidates) - 7)
+            panel_x1 = max(
+                [bbox[2] for _,_,_,bbox in right_lines] +
+                [br.x1 for br in right_images] +
+                [page.rect.width * 0.80]
+            ) + 6
+            panel_x1 = min(page.rect.width - 38, panel_x1)
+
+            y_candidates0 = [bbox[1] for _,_,_,bbox in right_lines] + [br.y0 for br in right_images]
+            y_candidates1 = [bbox[3] for _,_,_,bbox in right_lines] + [br.y1 for br in right_images]
+            panel_y0 = max(y0, min(y_candidates0) - 5) if y_candidates0 else y0
+            panel_y1 = min(y1, max(y_candidates1) + 5) if y_candidates1 else y1
+
+            panel = _render_pdf_region(
+                page, fitz.Rect(panel_x0, panel_y0, panel_x1, panel_y1), scale=1.9
+            )
+            if panel:
+                clean_stem, clean_options = _region_text_and_options(
+                    page, y0, y1, qno, x_max=panel_x0 - 2
+                )
+                return [panel], "圖片在右", clean_stem, clean_options, True
+
+    # --------------------------------------------------
+    # B. Full-width source card ABOVE the actual question prompt.
+    # Example: Q8 《第十二夜》 information card.
+    # --------------------------------------------------
+    prompt_pat = re.compile(r"^(根據(?:資料|上文|本文|右圖|右表|圖|表)|關於上述資料)")
+    prompt_lines = [
+        (y,x,t,bbox) for y,x,t,bbox in region_lines
+        if prompt_pat.search((t or "").strip())
+    ]
+    if image_blocks and prompt_lines:
+        prompt_y = min(bbox[1] for _,_,_,bbox in prompt_lines)
+        upper_images = [br for br in image_blocks if br.y0 < prompt_y - 4]
+        if upper_images and prompt_y - y0 >= 55:
+            left = min([br.x0 for br in upper_images] + [92.0]) - 5
+            right = max([br.x1 for br in upper_images] + [page.rect.width - 92.0]) + 5
+            left = max(75, left)
+            right = min(page.rect.width - 55, right)
+            top = max(y0, min(br.y0 for br in upper_images) - 5)
+            # Include the whole card down to just before the prompt.
+            card = _render_pdf_region(
+                page, fitz.Rect(left, top, right, prompt_y - 4), scale=1.8
+            )
+            if card:
+                clean_stem, clean_options = _region_text_and_options(
+                    page, y0, y1, qno, y_min=prompt_y - 1
+                )
+                return [card], "圖片在上", clean_stem, clean_options, True
+
+    # --------------------------------------------------
+    # C. Ordinary independent raster images.
+    # Keep old behavior, but MERGE overlapping/adjacent blocks into one crop
+    # when the PDF internally split a single picture into multiple blocks.
+    # --------------------------------------------------
+    if image_blocks:
+        # If all blocks occupy one compact visual cluster, render their union
+        # from the PDF instead of exporting block bytes separately.
+        ux0=min(br.x0 for br in image_blocks); uy0=min(br.y0 for br in image_blocks)
+        ux1=max(br.x1 for br in image_blocks); uy1=max(br.y1 for br in image_blocks)
+        union = fitz.Rect(ux0-4, uy0-4, ux1+4, uy1+4) & page.rect
+        if union.width <= page.rect.width * 0.82 and union.height <= (y1-y0) * 0.82:
+            merged = _render_pdf_region(page, union, scale=1.9)
+            if merged:
+                return [merged], "一般直列", stem, options, True
+
+    return [], "一般直列", stem, options, False
 
 
 def _clean_group_intro_text(text: str) -> str:
@@ -479,22 +632,13 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
         except Exception:
             body_crop = crop
 
-        visual = False
-        image_pngs = []
-        d = page.get_text("dict")
-        for block in d.get("blocks", []):
-            if block.get("type") != 1:
-                continue
-            br = fitz.Rect(block.get("bbox"))
-            if not br.intersects(crop_rect):
-                continue
-            # Ignore tiny decorative fragments.
-            if br.width < 25 or br.height < 20 or br.width * br.height < 1200:
-                continue
-            visual = True
-            data = block.get("image")
-            if data:
-                image_pngs.append(data)
+        image_pngs, auto_layout, clean_stem, clean_options, visual = _question_visual_composite(
+            page, y0, y1, qno, stem, options
+        )
+        if clean_stem:
+            stem = clean_stem
+        if clean_options:
+            options = clean_options
 
         q = Question(
             source_no=qno,
@@ -504,7 +648,8 @@ def extract_questions(question_pdf: bytes, expected_count: int = 42) -> Tuple[Li
             crop_png=crop,
             body_crop_png=body_crop,
             visual_mode=visual,
-            image_pngs=image_pngs
+            image_pngs=image_pngs,
+            layout_style=auto_layout
         )
         for a,b in groups:
             if a <= qno <= b:
@@ -3035,6 +3180,38 @@ def _render_question_review_editor(q, key_prefix="overview"):
         if render_edit == "整題圖像":
             st.info("本題目前採「整題圖像」，A～D 可不必另外重建；Word 會保留可編輯題號與答案括弧。")
 
+        if q.visual_repair_note:
+            with st.expander("🛠️ 本題曾套用舊解析污染修復", expanded=False):
+                st.caption(q.visual_repair_note)
+                if q.pre_visual_repair_text:
+                    st.markdown("**修復前題幹／選項備份**")
+                    backup_lines = [q.pre_visual_repair_text]
+                    for letter in ("A","B","C","D"):
+                        if (q.pre_visual_repair_options or {}).get(letter):
+                            backup_lines.append(
+                                f"({letter}) {(q.pre_visual_repair_options or {}).get(letter, '')}"
+                            )
+                    st.text_area(
+                        "修復前內容",
+                        value="\n".join(backup_lines),
+                        height=180,
+                        disabled=True,
+                        key=_wk("pre_repair_preview")
+                    )
+                    if st.button(
+                        "↩️ 還原修復前的人工／舊專案內容",
+                        key=_wk("restore_pre_repair"),
+                        use_container_width=True
+                    ):
+                        q.text = q.pre_visual_repair_text
+                        q.options = dict(q.pre_visual_repair_options or {})
+                        if q.pre_visual_repair_material:
+                            q.material = q.pre_visual_repair_material
+                        q.visual_repair_note = ""
+                        _clear_question_editor_widget_state()
+                        st.success("已還原本題修復前內容。")
+                        st.rerun()
+
         sync_group = False
         if (group_edit or "").strip():
             sync_group = st.checkbox(
@@ -3099,6 +3276,8 @@ def _render_question_review_editor(q, key_prefix="overview"):
             old_group = q.group_id
             new_material = material_edit.strip()
 
+            # q itself is the canonical project/output record.  Saving here must
+            # immediately update the same object later used by project ZIP and Word.
             _apply_structure_edit(
                 q, material_edit, stem_edit, oa, ob, oc, od,
                 group_edit, visual_edit,
@@ -3955,6 +4134,202 @@ def _restore_question_images_from_zip(z, q: Question):
         q.group_crop_pngs.append(z.read(f"{qbase}_group_{i:02d}.png"))
         i += 1
 
+def _app_version_tuple(value):
+    m = re.search(r"v(\d+)\.(\d+)(?:\.(\d+))?", str(value or ""))
+    if not m:
+        return (0, 0, 0)
+    return tuple(int(x or 0) for x in m.groups())
+
+
+def _cmp_text(value):
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _has_pdf_garbage(value):
+    s = str(value or "")
+    # Private-use glyphs are common when PDF symbol fonts are wrongly extracted.
+    if re.search(r"[\ue000-\uf8ff]", s):
+        return True
+    # Keep normal newlines/tabs; reject other embedded controls.
+    return any(ord(ch) < 32 and ch not in "\n\r\t" for ch in s)
+
+
+def _legacy_structure_is_obviously_polluted(q, nq):
+    """Return True only for strong, mechanical parser-contamination signatures."""
+    if not (getattr(nq, "visual_mode", False) and getattr(nq, "image_pngs", [])):
+        return False
+
+    old_blob = "\n".join([
+        q.text or "",
+        *(str((q.options or {}).get(k, "")) for k in ("A","B","C","D")),
+    ])
+    if _has_pdf_garbage(old_blob):
+        return True
+
+    # Right-side panel text was historically interleaved into left stem/options.
+    if (nq.layout_style or "") == "圖片在右":
+        extra_option_fragments = 0
+        for k in ("A","B","C","D"):
+            oldv = _cmp_text((q.options or {}).get(k, ""))
+            newv = _cmp_text((nq.options or {}).get(k, ""))
+            if newv and oldv.startswith(newv) and len(oldv) >= len(newv) + 4:
+                extra_option_fragments += 1
+
+        oldt = _cmp_text(q.text)
+        newt = _cmp_text(nq.text)
+        stem_has_large_extra = bool(
+            newt and newt in oldt and len(oldt) >= len(newt) + max(8, int(len(newt)*0.18))
+        )
+
+        if extra_option_fragments >= 1 or stem_has_large_extra:
+            return True
+
+    return False
+
+
+def _apply_safe_legacy_visual_structure(q, nq):
+    """Repair only obvious old parser damage, with a persistent human-restorable backup."""
+    if not (getattr(nq, "visual_mode", False) and getattr(nq, "image_pngs", [])):
+        return False
+
+    changed = False
+
+    # A verified source visual should be shown as mixed layout in legacy projects.
+    # This changes presentation state, not human-authored wording.
+    if q.render_mode in ("", "自動", "可編輯文字"):
+        q.render_mode = "圖文混合"
+        changed = True
+    if not q.include_image:
+        q.include_image = True
+        changed = True
+    if not q.visual_mode:
+        q.visual_mode = True
+        changed = True
+    if nq.layout_style in ("圖片在右", "圖片在上") and q.layout_style == "一般直列":
+        q.layout_style = nq.layout_style
+        changed = True
+
+    if not _legacy_structure_is_obviously_polluted(q, nq):
+        return changed
+
+    # Preserve the exact pre-repair content. Never destroy a possible human edit.
+    if not q.pre_visual_repair_text:
+        q.pre_visual_repair_text = q.text or ""
+    if not q.pre_visual_repair_options:
+        q.pre_visual_repair_options = dict(q.options or {})
+    if not q.pre_visual_repair_material:
+        q.pre_visual_repair_material = q.material or ""
+
+    q.text = nq.text or q.text
+    if nq.options:
+        q.options = dict(nq.options)
+    if _has_pdf_garbage(q.material) and nq.material and not _has_pdf_garbage(nq.material):
+        q.material = nq.material
+        if q.group_intro == q.pre_visual_repair_material:
+            q.group_intro = nq.material
+
+    q.visual_repair_note = (
+        "偵測到舊版 PDF 解析造成的圖文交錯／符號污染，已以原題重新建立結構；"
+        "修復前內容已完整保留，可在考題總覽還原。"
+    )
+    return True
+
+
+def _refresh_project_question_visuals_from_source_pdf(
+    questions, question_pdf_bytes, repair_legacy_structure=False
+):
+    """Rebuild source-visual assets and optionally repair only obvious legacy parser damage.
+
+    IMPORTANT:
+    The Question object is the canonical saved/edited record.  Loading a project
+    must never replace text/material/options/group/layout/render choices that the
+    user already edited in 考題總覽.
+
+    v6.12.13 incorrectly copied reparsed q.text/q.options/q.material/layout back
+    into the saved Question.  That made successfully saved overview edits appear
+    to "not update" after a project reload.
+
+    v6.12.14 therefore refreshes only:
+      - crop_png
+      - body_crop_png
+      - image_pngs
+      - group_crop_pngs
+
+    All editable/canonical fields are preserved exactly as stored in project.json.
+    """
+    if not question_pdf_bytes:
+        return False, ""
+    try:
+        reparsed, _ = extract_questions(
+            question_pdf_bytes,
+            expected_count=max([q.source_no for q in questions] or [42])
+        )
+        new_by_no = {q.source_no: q for q in reparsed}
+        refreshed = 0
+        repaired = 0
+
+        for q in questions:
+            nq = new_by_no.get(q.source_no)
+            if not nq:
+                continue
+
+            # Always refresh binary visual assets.
+            q.crop_png = nq.crop_png
+            q.body_crop_png = nq.body_crop_png
+            q.image_pngs = list(nq.image_pngs or [])
+            q.group_crop_pngs = list(nq.group_crop_pngs or [])
+
+            # For old projects only, repair presentation and ONLY strong mechanical
+            # parser contamination. The original stored values are backed up first.
+            if repair_legacy_structure and _apply_safe_legacy_visual_structure(q, nq):
+                repaired += 1
+
+            refreshed += 1
+
+        msg = (
+            f"已重新建立 {refreshed} 題原 PDF 視覺素材。"
+            + (f" 其中 {repaired} 題套用安全圖文結構修復。" if repair_legacy_structure else "")
+        )
+        if repaired:
+            msg += " 修復前內容均已保留，可在考題總覽逐題還原。"
+        else:
+            msg += " 未覆蓋考題總覽既有人工文字。"
+        return True, msg
+    except Exception as e:
+        return False, f"原始題本視覺素材重建失敗：{e}"
+
+
+def _clear_question_editor_widget_state():
+    """Remove stale UI widget values before a project is restored.
+
+    Streamlit text_area/selectbox values live in session_state.  The editor
+    intentionally initializes only when a key does not exist.  Therefore a
+    previous project's overview_single_* values can visually mask the newly
+    restored canonical Question values unless these keys are cleared.
+    """
+    prefixes = (
+        "overview_single_",
+        "overview_",
+        "workbench_",
+    )
+    explicit_fragments = (
+        "_material_", "_stem_", "_A_", "_B_", "_C_", "_D_",
+        "_group_", "_render_", "_layout_", "_include_image_",
+        "_visual_", "_reviewed_", "_sync_group_",
+    )
+    for key in list(st.session_state.keys()):
+        sk = str(key)
+        if sk.startswith("overview_single_"):
+            del st.session_state[key]
+            continue
+        # Avoid deleting global overview filters; only per-question widget keys.
+        if sk.startswith("overview_") and any(frag in sk for frag in explicit_fragments):
+            del st.session_state[key]
+            continue
+        if sk.startswith("workbench_") and any(frag in sk for frag in explicit_fragments):
+            del st.session_state[key]
+
+
 def _load_annual_project_zip(zip_bytes: bytes):
     """Restore a saved v5.1+ project into session_state."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
@@ -3979,6 +4354,10 @@ def _load_annual_project_zip(zip_bytes: bytes):
             _migrate_question_language_notes(q)
             questions.append(q)
 
+        # Clear stale per-question editor widgets first, otherwise Streamlit may
+        # continue displaying values from the previously loaded project/session.
+        _clear_question_editor_widget_state()
+
         st.session_state.questions = questions
         st.session_state.year = int(manifest.get("year", 115))
         legacy_refdb = manifest.get(
@@ -3999,6 +4378,20 @@ def _load_annual_project_zip(zip_bytes: bytes):
                     "data": z.read(path),
                 }
         st.session_state.project_sources = restored_sources
+
+        # v6.12.15: refresh source visuals; legacy <=v6.12.10 gets only strong, backed-up parser-damage repairs.
+        # Rebuild question visual assets from the ORIGINAL question PDF when available.
+        qsrc = restored_sources.get("question_pdf", {})
+        if isinstance(qsrc, dict) and isinstance(qsrc.get("data"), (bytes, bytearray)):
+            legacy_visual_repair = _app_version_tuple(
+                manifest.get("app_version", "")
+            ) <= (6, 12, 10)
+            ok, msg = _refresh_project_question_visuals_from_source_pdf(
+                questions,
+                qsrc.get("data"),
+                repair_legacy_structure=legacy_visual_repair
+            )
+            st.session_state["visual_refresh_message"] = msg
 
         # Restore project settings. This function is called before a rerun so
         # widgets will be created with the restored session_state values.
@@ -4099,6 +4492,10 @@ with pc1:
                 f"翰林 {info['publishers']['翰林']}、康軒 {info['publishers']['康軒']}、"
                 f"南一 {info['publishers']['南一']} 題；內部參考 {info['history_files']} 份。"
             )
+            refresh_msg = st.session_state.pop("visual_refresh_message", "")
+            if refresh_msg:
+                st.info(refresh_msg)
+
             inv = info.get("annual_source_inventory", {})
             if not any(inv.values()):
                 st.info(
@@ -5565,7 +5962,7 @@ with tab4:
 
 
         if output_mode == "可編輯原會考風格（推薦）":
-            st.info("學生版與教師版現在共用同一套題目版型：一般題使用可編輯文字；偵測到原題圖片／圖表時使用「可編輯文字＋原圖」的圖文混合；只有無法可靠拆解的特殊題才使用整題圖像。教師版另外接解析／教學外框。")
+            st.info("學生版與教師版共用同一套原題視覺解析；而「考題總覽」儲存後的題幹、選項、閱讀材料、題組與版型設定以專案內資料為唯一版本。重新載入專案時只重建原 PDF 圖片素材，不會再用 PDF 解析結果覆蓋人工編輯內容。")
             incomplete = [q.source_no for q in selected if _effective_render_mode(q) != "整題圖像" and len([v for v in q.options.values() if (v or "").strip()]) < 4]
             if incomplete:
                 st.warning("以下非「整題圖像」題目尚未有完整 A–D：" + "、".join(map(str, incomplete)) + "。可補齊文字，或到①題目結構校對改成「整題圖像」。")
