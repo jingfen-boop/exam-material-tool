@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.15.1 分頁式單題內容編輯工作台"
+APP_VERSION = "Web v6.15.2 左側參考文字可複製版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2674,7 +2674,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.15.1 hard rule:
+    v6.15.2 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2974,7 +2974,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.15.1: every publisher uses the SAME display/read sanitization path.
+    # v6.15.2: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2991,7 +2991,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.15.1:
+    v6.15.2:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3640,7 +3640,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.15.1 transparent recommendation evidence fields
+    # v6.15.2 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -5239,7 +5239,7 @@ with setup_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.15.1 — hard reset only the annual reference layer.
+    # v6.15.2 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5334,7 +5334,7 @@ with setup_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.15.1: UPDATE semantics, not destructive rebuild semantics.
+        # v6.15.2: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6046,6 +6046,10 @@ with edit_tab:
 
         with ref_col:
             st.markdown("## 左側｜校對參考資料")
+            st.caption(
+                "左側文字框現在可直接反白、複製，也可暫時編輯方便摘錄；"
+                "左側的修改不會寫回出版社或歷年參考庫。"
+            )
             ref_tabs = st.tabs(["翰林", "康軒", "南一", "歷年教師版", "原題"])
 
             for _tab, pub in zip(ref_tabs[:3], ["翰林", "康軒", "南一"]):
@@ -6074,7 +6078,8 @@ with edit_tab:
                             value=full_analysis or "（目前沒有可可靠辨識的詳解內容）",
                             height=500,
                             key=f"side_ref_{pub}_{qno}_{_ref_sig}",
-                            disabled=True,
+                            disabled=False,
+                            help="可直接反白複製；在此框內的臨時修改不會寫回參考庫。",
                             label_visibility="collapsed"
                         )
                         with st.expander("查看清理後完整來源", expanded=False):
@@ -6083,8 +6088,9 @@ with edit_tab:
                                 value=block,
                                 height=400,
                                 key=f"side_ref_full_{pub}_{qno}_{_ref_sig}",
-                                disabled=True,
-                                label_visibility="collapsed"
+                                disabled=False,
+                                help="可直接反白複製；在此框內的臨時修改不會寫回參考庫.",
+                            label_visibility="collapsed"
                             )
                     else:
                         st.info("目前年度參考庫沒有辨識到這一題。")
@@ -6104,8 +6110,9 @@ with edit_tab:
                                 f"side_hist_exp_{qno}_{_ri}",
                                 value=_sec.get("analysis") or "（未擷取到解析）",
                                 height=180,
-                                disabled=True,
+                                disabled=False,
                                 key=f"side_hist_exp_{qno}_{_ri}",
+                                help="可直接反白複製；在此框內的臨時修改不會寫回參考庫。",
                                 label_visibility="collapsed"
                             )
                             st.markdown("**教學重點**")
@@ -6113,8 +6120,9 @@ with edit_tab:
                                 f"side_hist_focus_{qno}_{_ri}",
                                 value=_sec.get("focus") or "（未擷取到教學重點）",
                                 height=120,
-                                disabled=True,
+                                disabled=False,
                                 key=f"side_hist_focus_{qno}_{_ri}",
+                                help="可直接反白複製；在此框內的臨時修改不會寫回參考庫。",
                                 label_visibility="collapsed"
                             )
                             st.markdown("**教學步驟**")
@@ -6122,8 +6130,9 @@ with edit_tab:
                                 f"side_hist_teach_{qno}_{_ri}",
                                 value=_sec.get("teaching") or "（未擷取到教學步驟）",
                                 height=220,
-                                disabled=True,
+                                disabled=False,
                                 key=f"side_hist_teach_{qno}_{_ri}",
+                                help="可直接反白複製；在此框內的臨時修改不會寫回參考庫。",
                                 label_visibility="collapsed"
                             )
                             if _sec.get("note"):
@@ -6132,9 +6141,10 @@ with edit_tab:
                                     f"side_hist_note_{qno}_{_ri}",
                                     value=_sec.get("note", ""),
                                     height=140,
-                                    disabled=True,
-                                    key=f"side_hist_note_{qno}_{_ri}",
-                                    label_visibility="collapsed"
+                                disabled=False,
+                                key=f"side_hist_note_{qno}_{_ri}",
+                                help="可直接反白複製；在此框內的臨時修改不會寫回參考庫。",
+                                label_visibility="collapsed"
                                 )
                 else:
                     st.info("請先在右側「能力／分析」確認能力類型，才能列出歷年同題型教師版。")
