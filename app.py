@@ -1,5 +1,6 @@
 
 import io
+import hashlib
 from pathlib import Path
 import os
 import re
@@ -22,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.8 建議稿撰寫依據透明化版"
+APP_VERSION = "Web v6.13.9 參考庫寫入與顯示同步修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2696,7 +2697,7 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None):
                 except Exception:
                     parsed = {}
 
-            # v6.13.8: dedicated publisher explanation PPTX gets priority.
+            # v6.13.9: dedicated publisher explanation PPTX gets priority.
             # Reason: some teacher-edition DOCX files are visually laid out in columns,
             # so their extracted paragraph order can separate a question from its explanation.
             # A publisher "解析" PPTX is usually one-question-per-slide and explicitly contains
@@ -3484,7 +3485,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.8 transparent recommendation evidence fields
+    # v6.13.9 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4988,7 +4989,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.13.8 — hard reset only the annual reference layer.
+    # v6.13.9 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5083,35 +5084,88 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        newdb = _empty_reference_db(int(st.session_state.year))
-        newdb["reference_parser_version"] = "ordered-docx-v2"
+        # v6.13.9: UPDATE semantics, not destructive rebuild semantics.
+        # Start from the currently loaded reference DB and replace only sources
+        # actually uploaded in this run. This prevents testing 南一 from wiping
+        # 翰林／康軒／歷年教師版.
+        olddb = _normalize_legacy_reference_db(
+            _load_reference_library(),
+            int(st.session_state.year)
+        )
+        newdb = {
+            "format_version": olddb.get("format_version", "3.1"),
+            "reference_parser_version": "ordered-docx-v2",
+            "year": int(st.session_state.year),
+            "publisher": {
+                pub: dict((olddb.get("publisher", {}) or {}).get(pub, {}) or {})
+                for pub in ("翰林", "康軒", "南一")
+            },
+            "history_raw": dict(olddb.get("history_raw", {}) or {}),
+            "strategy": olddb.get("strategy", DEFAULT_STRATEGY_LIBRARY),
+            "drafts": olddb.get("drafts", {}),
+        }
         all_errors = []
 
-        # Save original annual source files inside the portable project ZIP.
-        _capture_source_list("hanlin", hanlin_files)
-        _capture_source_list("kangxuan", kang_files)
-        _capture_source_list("nanyi", nanyi_files)
-        _capture_source_list("history", history_files)
+        # Save only sources actually uploaded this run into the portable project ZIP.
+        if hanlin_files:
+            _capture_source_list("hanlin", hanlin_files)
+        if kang_files:
+            _capture_source_list("kangxuan", kang_files)
+        if nanyi_files:
+            _capture_source_list("nanyi", nanyi_files)
+        if history_files:
+            _capture_source_list("history", history_files)
 
         for pub, fileset in [("翰林", hanlin_files), ("康軒", kang_files), ("南一", nanyi_files)]:
+            if not fileset:
+                continue
             parsed, errs = _parse_publisher_files(fileset, expected_for_refs, st.session_state.questions)
-            newdb["publisher"][pub] = parsed
             all_errors.extend(errs)
+            if parsed:
+                newdb["publisher"][pub] = parsed
+            else:
+                all_errors.append(f"{pub}：本次解析為0題，已保留原參考庫，不覆蓋。")
 
-        for uploaded in history_files or []:
-            try:
-                newdb["history_raw"][uploaded.name] = _normalize_reference_text(_uploaded_file_text(uploaded))
-            except Exception as e:
-                all_errors.append(f"{uploaded.name}：{e}")
+        if history_files:
+            parsed_history = {}
+            for uploaded in history_files:
+                try:
+                    parsed_history[uploaded.name] = _normalize_reference_text(_uploaded_file_text(uploaded))
+                except Exception as e:
+                    all_errors.append(f"{uploaded.name}：{e}")
+            if parsed_history:
+                newdb["history_raw"] = parsed_history
+            else:
+                all_errors.append("歷年教師版：本次沒有取得內容，已保留原參考庫。")
 
-        olddb = _load_reference_library()
-        if olddb.get("year") == int(st.session_state.year):
-            newdb["drafts"] = olddb.get("drafts", {})
-
+        # Write the newly parsed data to the actual session reference DB.
         st.session_state.reference_db = newdb
 
+        # CRITICAL Streamlit fix:
+        # text_area widgets with an existing key keep their OLD session value and
+        # ignore a new value= argument. Clear only publisher reference-view widget
+        # keys so the workbench will display the just-written reference DB instead
+        # of stale blank/legacy text.
+        for k in list(st.session_state.keys()):
+            ks = str(k)
+            if ks.startswith("ref_") or ks.startswith("ref_full_"):
+                st.session_state.pop(k, None)
+
+        # Save a post-write diagnostic snapshot for the next rerun.
+        check = {}
+        for pub in ("翰林", "康軒", "南一"):
+            qdict = newdb.get("publisher", {}).get(pub, {}) or {}
+            q4_block = qdict.get("4", "")
+            q4_analysis = _publisher_analysis_only(q4_block) if q4_block else ""
+            check[pub] = {
+                "題數": len(qdict),
+                "第4題區塊字數": len(q4_block),
+                "第4題詳解字數": len(q4_analysis),
+            }
+        st.session_state["_last_reference_write_check"] = check
+
         st.success(
-            "年度參考庫已建立。出版社辨識："
+            "年度參考庫已更新。出版社辨識："
             + "／".join(f"{p}{len(newdb['publisher'][p])}題" for p in ("翰林","康軒","南一"))
             + f"；內部參考 {len(newdb['history_raw'])} 份。"
         )
@@ -5120,6 +5174,23 @@ with ref_tab:
             st.warning("以下檔案需處理：\n- " + "\n- ".join(all_errors))
 
         st.rerun()
+
+    if st.session_state.get("_last_reference_write_check"):
+        with st.expander("✅ 上一次參考庫寫入結果", expanded=True):
+            st.caption(
+                "這裡檢查的是「已經寫進 reference_db 的內容」，不是上傳檔案的暫時測試結果。"
+            )
+            st.dataframe(
+                [
+                    {"出版社": pub, **vals}
+                    for pub, vals in st.session_state["_last_reference_write_check"].items()
+                ],
+                hide_index=True,
+                use_container_width=True
+            )
+            if st.button("關閉寫入結果", key="dismiss_reference_write_check"):
+                st.session_state.pop("_last_reference_write_check", None)
+                st.rerun()
 
     # v6.12.9 safe parser migration.
     # A legacy ZIP may contain 42/42/42 + history parsed data but only the
@@ -6122,20 +6193,28 @@ with tab3:
                                     "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
                                 )
 
+                        # v6.13.9: reference source is display-only. Include a
+                        # content signature in widget keys so Streamlit can never
+                        # reuse a stale blank value after the reference DB changes.
+                        _ref_sig = hashlib.md5(
+                            (str(block) + "\n" + str(full_analysis)).encode("utf-8", errors="ignore")
+                        ).hexdigest()[:10]
                         st.text_area(
                             f"{pub}第{q.source_no}題完整詳解",
                             value=full_analysis or "（目前沒有可可靠辨識的詳解內容）",
                             height=360,
-                            key=f"ref_{pub}_{qno}",
-                            label_visibility="collapsed"
+                            key=f"ref_{pub}_{qno}_{_ref_sig}",
+                            label_visibility="collapsed",
+                            disabled=True
                         )
                         with st.expander("查看本題完整來源", expanded=False):
                             st.text_area(
                                 f"{pub}第{q.source_no}題完整來源",
                                 value=block,
                                 height=420,
-                                key=f"ref_full_{pub}_{qno}",
-                                label_visibility="collapsed"
+                                key=f"ref_full_{pub}_{qno}_{_ref_sig}",
+                                label_visibility="collapsed",
+                                disabled=True
                             )
                     else:
                         st.info("目前年度參考庫沒有辨識到這一題，請回「① 年度資料」檢查來源檔。")
