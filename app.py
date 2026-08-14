@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.3 舊參考庫重組修正版"
+APP_VERSION = "Web v6.13.4 內部教師版確定配對＋來源缺漏提示版"
 
 # -----------------------------
 # Models
@@ -2731,59 +2731,101 @@ def _dedupe_consecutive_chunks(chunks):
     return out
 
 def _legacy_history_reconstructed_records(raw: str):
-    """Repair old history_raw shaped as ALL QUESTIONS -> ALL TEACHER BOXES."""
+    """Deterministically rebuild old internal teacher editions.
+
+    Verified legacy structure in the user's current project:
+      [question 1 ... question N] -> [解析1 ... 解析N]
+
+    The old parser placed all Word table content after all normal paragraphs.
+    Therefore question-number proximity CANNOT recover teacher content.
+    The only reliable legacy mapping is sequence-to-sequence:
+      metadata #1 <-> 解析 #1, metadata #2 <-> 解析 #2, ...
+
+    We activate this route only when the source contains a plausible equal
+    sequence of question metadata and 解析 blocks.
+    """
     raw=_normalize_reference_text(raw or "")
     if not raw:
         return []
 
     cats=[c for c in ABILITY_OPTIONS if c and c!="其他"]
     cat_alt="|".join(re.escape(c) for c in cats)
+
+    # Flexible around hyphens / spaces / rate/category ordering seen in legacy files.
     meta_re=re.compile(
-        rf"(?P<year>\d{{3}})\s*會考\s*-\s*"
-        rf"(?P<qno>\d{{1,2}})(?P<rate>0\.\d+)?\s*"
+        rf"(?P<year>\d{{3}})\s*會考\s*[-－—]?\s*"
+        rf"(?P<qno>\d{{1,2}})\s*"
+        rf"(?P<rate>0\.\d+)?\s*"
         rf"(?P<category>{cat_alt})"
     )
     metas=list(meta_re.finditer(raw))
-    if not metas:
+
+    analysis_re=re.compile(
+        r"(?m)^[ \t]*(?:【[ \t]*)?解析(?:[ \t]*】)?[ \t]*[：:][ \t]*"
+    )
+    analyses=list(analysis_re.finditer(raw))
+
+    if not metas or not analyses:
         return []
 
-    first_analysis=re.search(r"(?m)^\s*(?:【\s*)?解析(?:\s*】)?\s*[：:]\s*", raw)
-    if not first_analysis:
+    # Legacy "all questions first" requires the first analysis to occur after
+    # the last question metadata.
+    if analyses[0].start() <= metas[-1].start():
         return []
-    question_end=first_analysis.start()
 
-    q_records=[]
-    question_metas=[m for m in metas if m.start()<question_end]
-    for i,meta in enumerate(question_metas):
-        start=meta.start()
-        before_start=max(0,start-1200)
-        before=raw[before_start:start]
-        qstarts=list(re.finditer(
-            r"(?m)^[ \t]*[（(][ \t]*[A-DＡ-Ｄ][ \t]*[）)][ \t]*"
-            r"\d{1,2}[.、．][ \t]*", before
-        ))
-        if qstarts:
-            start=before_start+qstarts[-1].start()
-        end=question_metas[i+1].start() if i+1<len(question_metas) else question_end
-        q_records.append({
-            "year":meta.group("year"),
-            "qno":meta.group("qno"),
-            "category":meta.group("category"),
-            "question":raw[start:end].strip(),
-        })
+    # This is the strongest correctness check. If counts differ substantially,
+    # do not guess.
+    if len(metas) != len(analyses):
+        return []
 
-    teacher_tail=raw[first_analysis.start():]
-    starts=list(re.finditer(r"(?m)^\s*(?:【\s*)?解析(?:\s*】)?\s*[：:]\s*", teacher_tail))
-    chunks=[]
-    for i,m in enumerate(starts):
-        end=starts[i+1].start() if i+1<len(starts) else len(teacher_tail)
-        chunks.append(teacher_tail[m.start():end].strip())
-    chunks=_dedupe_consecutive_chunks(chunks)
+    question_area_end=analyses[0].start()
+
+    # Answer-bearing question-start pattern, deliberately tolerant of spaces,
+    # full-width brackets and tabs from Word exports.
+    qstart_re=re.compile(
+        r"(?m)^[ \t]*[（(][ \t]*[A-DＡ-Ｄ][ \t]*[）)][ \t]*"
+        r"(?P<num>\d{1,2})[ \t]*[.．、][ \t]*"
+    )
+    qstarts=[m for m in qstart_re.finditer(raw[:question_area_end])]
 
     records=[]
-    for i,qrec in enumerate(q_records):
-        teacher=chunks[i] if i<len(chunks) else ""
-        records.append({**qrec, "text":(qrec["question"]+"\n"+teacher).strip(), "teacher_chunk":teacher})
+    for i,meta in enumerate(metas):
+        qno=int(meta.group("qno"))
+
+        # Find the nearest answer-bearing start for the SAME number before metadata.
+        same=[m for m in qstarts if int(m.group("num"))==qno and m.start()<=meta.start()]
+        if same:
+            q_start=same[-1].start()
+        else:
+            # Still never return the whole source. Use a bounded local question window.
+            q_start=max(0, raw.rfind("\n", max(0, meta.start()-1200), meta.start()))
+            if q_start<0:
+                q_start=max(0,meta.start()-800)
+
+        if i+1<len(metas):
+            next_meta=metas[i+1]
+            same_next=[m for m in qstarts if int(m.group("num"))==int(next_meta.group("qno"))
+                       and m.start()>=meta.end() and m.start()<=next_meta.start()]
+            q_end=same_next[0].start() if same_next else next_meta.start()
+        else:
+            q_end=question_area_end
+
+        question=raw[q_start:q_end].strip()
+
+        a_start=analyses[i].start()
+        a_end=analyses[i+1].start() if i+1<len(analyses) else len(raw)
+        teacher=raw[a_start:a_end].strip()
+
+        records.append({
+            "year":meta.group("year"),
+            "qno":str(qno),
+            "category":meta.group("category"),
+            "question":question,
+            "teacher_chunk":teacher,
+            "text":(question+"\n"+teacher).strip(),
+            "legacy_sequence_rebuilt":True,
+        })
+
     return records
 
 def _publisher_orphan_explanation_index(refdb, pub):
@@ -5871,10 +5913,20 @@ with tab3:
                                 "表示舊版把詳解存到錯誤題號區塊；新版只重新配對既有原文。"
                             )
                         else:
-                            st.warning(
-                                "🟡 此舊參考庫目前確實沒有找到本題可可靠配對的詳解文字。"
-                                "若原始出版社檔有詳解，只需要重新匯入這一家來源檔。"
-                            )
+                            saved_sources = st.session_state.get("project_sources", {}) or {}
+                            pub_prefix = {"翰林":"hanlin_", "康軒":"kangxuan_", "南一":"nanyi_"}[pub]
+                            has_original = any(str(k).startswith(pub_prefix) for k in saved_sources.keys())
+                            if has_original:
+                                st.warning(
+                                    "🟡 本題目前未可靠辨識到詳解，但專案中有保存這一家原始來源檔；"
+                                    "可回②年度資料執行重新建立參考庫。"
+                                )
+                            else:
+                                st.warning(
+                                    "🟠 目前這份舊專案 ZIP 沒有保存這一家出版社的原始來源檔，"
+                                    "而既有參考庫中也找不到本題詳解文字。"
+                                    "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
+                                )
 
                         st.text_area(
                             f"{pub}第{q.source_no}題完整詳解",
@@ -5961,6 +6013,8 @@ with tab3:
                     for idx, (source, excerpt) in enumerate(examples, 1):
                         sections = _history_teacher_sections(excerpt)
                         st.markdown(f"**{source}**")
+                        if "舊檔重組" in source:
+                            st.success("🟢 已依舊檔「題目順序 ↔ 解析順序」重新配對本題，不再顯示整份題本。")
 
                         with st.expander("題目", expanded=False):
                             st.text_area(
