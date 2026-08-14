@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.15.3 文言文語譯校訂版"
+APP_VERSION = "Web v6.15.4 文言文語譯 JSON 自動產出版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -54,6 +54,7 @@ class Question:
     alternative_category: str = ""
     category_reason: str = ""
     translation: str = ""
+    translation_basis: str = ""
     explanation: str = ""
     synthesis_notes: str = ""
     lexical_verification: str = ""
@@ -2675,7 +2676,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.15.3 hard rule:
+    v6.15.4 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2975,7 +2976,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.15.3: every publisher uses the SAME display/read sanitization path.
+    # v6.15.4: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2992,7 +2993,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.15.3:
+    v6.15.4:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3641,7 +3642,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.15.3 transparent recommendation evidence fields
+    # v6.15.4 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4115,6 +4116,14 @@ def _build_chatgpt_analysis_package(refdb, q):
 若直接引用教育部釋義，不可任意改寫；若為教材可讀性而轉述，標示「依教育部辭典義項整理」。
 本題若完全無需字詞解釋，字詞查證紀錄填「本題無需字詞查證」。
 
+【文言文語譯的強制規則】
+1. 若本題材料含文言文，必須在「建議詳解」之前先完成「語譯撰寫依據」與「建議語譯」；非文言文題兩欄皆留空。
+2. 語譯撰寫時先比對翰林、康軒、南一實際提供的語譯／解析，整理共同語意與差異，不可直接照抄任一家版本。
+3. 遇到關鍵實詞、虛詞、古今異義、特殊義項或影響句意的詞語，必須依前述字詞查證順位查證：教育部《國語辭典簡編本》→教育部《重編國語辭典修訂本》→三家出版社。
+4. 「語譯撰寫依據」必須具體寫出：用了哪些出版社內容、哪些關鍵字詞經辭典查證、最後如何依上下文選義。
+5. 「建議語譯」以忠實、通順、可供國中教師直接使用為原則；必要時可補足省略主語或語意，但不得加入原文沒有的情節或評價。
+6. 若來源不足或無法完成必要的辭典查證，語譯不得硬猜；在「語譯撰寫依據」明寫「需人工查證」，「建議語譯」僅保留來源可支持的部分。
+
 【詳解文風的強制規則】
 「建議詳解」的寫法以【本團隊歷年同能力類型參考】為最高優先；三家出版社只用來交叉確認答案依據、補足資訊，不可作為句型或段落模板。
 1. 必須重新組織論證，不得沿用任一家出版社的敘述順序、句型骨架或大段措辭。
@@ -4150,6 +4159,12 @@ def _build_chatgpt_analysis_package(refdb, q):
 【字詞查證紀錄】
 （逐項列出：字詞｜採用來源｜適用義項／依義項整理｜必要時說明上一順位查無適用資料；無則寫「本題無需字詞查證」）
 
+【語譯撰寫依據】
+（只有文言文題填寫：列出三家比對內容與關鍵字詞查證依據；非文言題留空）
+
+【建議語譯】
+（只有文言文題填寫完整語譯；非文言題留空）
+
 【建議詳解】
 （內容）
 
@@ -4177,6 +4192,8 @@ def _parse_chatgpt_integrated_result(text):
     headings = [
         "三家比較筆記",
         "字詞查證紀錄",
+        "語譯撰寫依據",
+        "建議語譯",
         "建議詳解",
         "教學重點",
         "建議教學步驟",
@@ -4206,6 +4223,8 @@ def _parse_chatgpt_integrated_result(text):
     return {
         "synthesis_notes": found.get("三家比較筆記", ""),
         "lexical_verification": found.get("字詞查證紀錄", ""),
+        "translation_basis": found.get("語譯撰寫依據", ""),
+        "translation": found.get("建議語譯", ""),
         "explanation": found.get("建議詳解", ""),
         "teaching_focus": found.get("教學重點", ""),
         "teaching": found.get("建議教學步驟", ""),
@@ -4245,6 +4264,8 @@ def _build_batch_chatgpt_package(refdb, questions):
                 "能力類型判斷理由": "簡述主要認知任務及為何符合歷年分類",
                 "三家比較筆記": "完整內容",
                 "字詞查證紀錄": "逐項列出字詞、採用來源與適用義項；無需查證則明記",
+                "語譯撰寫依據": "文言文題列出三家語譯比對與辭典查證依據；非文言題留空",
+                "建議語譯": "文言文題輸出完整語譯；非文言題留空",
                 "建議詳解": "完整內容",
                 "教學重點": "完整內容",
                 "建議教學步驟": "完整內容",
@@ -4273,16 +4294,23 @@ def _build_batch_chatgpt_package(refdb, questions):
 7. 「建議教學步驟」必須具體、連貫、可操作，不可只寫「讀題、找線索、排除」。
 8. 能力類型優先參照本團隊歷年分類證據；提供「建議能力類型、備選能力類型、能力類型判斷理由」，最終仍由教師人工確認。
 9. 只要輸出牽涉字義、詞義、成語義、文言詞義或語詞用法，查證順序固定為：①教育部《國語辭典簡編本》→②教育部《重編國語辭典修訂本》→③三家出版社。上一順位無適用資料才能用下一順位；無法實查時寫「需人工查證」，不得杜撰。
-10. 【筆記策略的核心定位】筆記策略不是解當下題目的工具，而是讓學生累積可跨題複習的語文知識。只整理重要字、詞、成語、字義辨析、文言語詞、標點、修辭、六書、語文規則等。
+10. 【文言文語譯】
+   - 若題目材料含文言文，必須填寫「語譯撰寫依據」與「建議語譯」。
+   - 先比對翰林、康軒、南一實際提供的語譯／解析，共同點作為主要語意依據，差異處需判斷上下文。
+   - 關鍵實詞、虛詞、古今異義、特殊義項仍依教育部辭典查證順位確認；不得直接以出版社釋義取代辭典查證。
+   - 「語譯撰寫依據」要寫清楚用了哪些具體內容與查證結果，不只列來源名稱。
+   - 「建議語譯」必須重新整合，忠實、通順，不得直接複製任一家出版社。
+   - 非文言文題：「語譯撰寫依據」與「建議語譯」都填空字串 ""。
+11. 【筆記策略的核心定位】筆記策略不是解當下題目的工具，而是讓學生累積可跨題複習的語文知識。只整理重要字、詞、成語、字義辨析、文言語詞、標點、修辭、六書、語文規則等。
    - 不得把「選項／文本證據／判斷／是否符合題意／共同點／排除流程」做成筆記表格。
    - 字詞類最優先使用「詞語／解釋」兩欄；第一欄若有指定辨識字，必須用「」框出該字，例如「立『即』」「若『即』若離」。
    - 表頭第二欄直接寫「解釋」，不要寫「『即』的意思」之類只綁定某題的表頭。
    - 只有語文知識本身需要時才增加第三欄；不得為了解題而增加「是否符合」「判斷」等欄位。
    - 若本題沒有值得跨題記住的語文知識，「筆記策略」寫「本題不另設語文筆記」，「筆記策略表格」填 null。
    - 涉及字詞解釋時，表格內容必須沿用「字詞查證紀錄」的教育部辭典查證結果。
-11. 每題固定包含：建議能力類型、備選能力類型、能力類型判斷理由、三家比較筆記、字詞查證紀錄、建議詳解、教學重點、建議教學步驟、筆記策略、筆記策略表格。
-12. 若資料不足，對應欄位明確寫「需人工確認」，不要杜撰。
-13. 回覆只能輸出一個 JSON 物件，不要加前言、後記、Markdown 或程式碼圍欄；question_no 必須與本次原題號完全一致。
+12. 每題固定包含：建議能力類型、備選能力類型、能力類型判斷理由、三家比較筆記、字詞查證紀錄、語譯撰寫依據、建議語譯、建議詳解、教學重點、建議教學步驟、筆記策略、筆記策略表格。
+13. 若資料不足，對應欄位明確寫「需人工確認」，不要杜撰。
+14. 回覆只能輸出一個 JSON 物件，不要加前言、後記、Markdown 或程式碼圍欄；question_no 必須與本次原題號完全一致。
 
 JSON 結構範例：
 {json.dumps(schema_example, ensure_ascii=False, indent=2)}
@@ -4371,6 +4399,8 @@ def _parse_batch_chatgpt_result(text, questions):
         alternative_category = str(item.get("備選能力類型", "") or "").strip()
         category_reason = str(item.get("能力類型判斷理由", "") or "").strip()
         lexical_verification = str(item.get("字詞查證紀錄", "") or "").strip()
+        translation_basis = str(item.get("語譯撰寫依據", "") or "").strip()
+        translation = str(item.get("建議語譯", "") or "").strip()
         note_table_obj = item.get("筆記策略表格", None)
         if note_table_obj in ("", None, False):
             note_table_json = ""
@@ -4391,6 +4421,8 @@ def _parse_batch_chatgpt_result(text, questions):
             "category_reason": category_reason,
             "synthesis_notes": values["三家比較筆記"],
             "lexical_verification": lexical_verification,
+            "translation_basis": translation_basis,
+            "translation": translation,
             "explanation": values["建議詳解"],
             "teaching_focus": values["教學重點"],
             "teaching": values["建議教學步驟"],
@@ -4434,6 +4466,8 @@ def _apply_batch_chatgpt_result(parsed_all, questions):
         # imported directly instead of waiting for the rule-based backup button.
         q.synthesis_notes = parsed.get("synthesis_notes", "")
         q.lexical_verification = parsed.get("lexical_verification", "")
+        q.translation_basis = parsed.get("translation_basis", "")
+        q.translation = parsed.get("translation", "")
         q.explanation = parsed.get("explanation", "")
         q.teaching_focus = parsed.get("teaching_focus", "")
         q.teaching = parsed.get("teaching", "")
@@ -5240,7 +5274,7 @@ with setup_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.15.3 — hard reset only the annual reference layer.
+    # v6.15.4 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5335,7 +5369,7 @@ with setup_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.15.3: UPDATE semantics, not destructive rebuild semantics.
+        # v6.15.4: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -5935,7 +5969,7 @@ with edit_tab:
                     if str(q.source_no) not in preview_parsed
                 ]
                 st.markdown("**匯入前預檢**")
-                st.caption("只有題號與五個必要欄位都完整的題目才會列為辨識成功；確認題數後再正式匯入。")
+                st.caption("只有題號與必要內容欄位完整的題目才會列為辨識成功；文言文題另會匯入語譯撰寫依據與建議語譯。")
                 st.metric("已辨識題數", f"{len(recognized)} / {len(batch_questions)}")
                 if recognized:
                     st.success("已辨識：" + "、".join(f"第{x}題 ✓" for x in recognized))
@@ -5969,7 +6003,7 @@ with edit_tab:
                 errs = st.session_state.pop("batch_import_errors", [])
                 if count:
                     st.success(f"已成功匯入 {count} 題。接下來直接往下逐題檢查與微調，不需要再貼任何 ChatGPT 內容。")
-                    st.info("下一步：逐題確認【三家比較筆記】【字詞查證紀錄】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】；若某一題真的需要重做，再展開該題的「進階／單題重做」。")
+                    st.info("下一步：逐題確認【三家比較筆記】【字詞查證紀錄】；文言文題再確認【語譯撰寫依據】【建議語譯】；並校對【建議詳解】【教學重點】【建議教學步驟】【筆記策略】；若某一題真的需要重做，再展開該題的「進階／單題重做」。")
                 if errs:
                     st.warning("；".join(errs))
             st.divider()
@@ -6321,11 +6355,22 @@ with edit_tab:
                     "語譯可比對左側翰林／康軒／南一版本；涉及特定字詞義時，"
                     "仍以教育部國語辭典查證結果為準。非文言題可留白。"
                 )
+                if getattr(q, "translation_basis", ""):
+                    with st.expander("📚 查看語譯撰寫依據", expanded=False):
+                        st.text_area(
+                            "語譯撰寫依據",
+                            value=q.translation_basis,
+                            height=220,
+                            disabled=True,
+                            key=f"trans_basis_view_{qno}",
+                            label_visibility="collapsed"
+                        )
+
                 q.translation = st.text_area(
                     "建議語譯",
                     height=260,
                     key=f"trans_{qno}",
-                    placeholder="文言文題請在此整理完整語譯；非文言題可留白。"
+                    placeholder="新版 JSON 匯入後，文言文題會自動產生建議語譯；非文言題可留白。"
                 )
 
                 st.markdown("### 建議詳解")
@@ -6336,6 +6381,8 @@ with edit_tab:
                     _basis_parts.append("【三家比較／綜合筆記】\n" + q.synthesis_notes)
                 if getattr(q, "lexical_verification", ""):
                     _basis_parts.append("【字詞查證紀錄】\n" + q.lexical_verification)
+                if getattr(q, "translation_basis", ""):
+                    _basis_parts.append("【語譯撰寫依據】\n" + q.translation_basis)
                 if getattr(q, "translation", ""):
                     _basis_parts.append("【目前語譯草稿】\n" + q.translation)
 
