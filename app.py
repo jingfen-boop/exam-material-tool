@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.4 辭典原文三欄筆記版"
+APP_VERSION = "Web v6.16.5 通用舊專案相容修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -3723,12 +3723,9 @@ def _render_question_review_editor(q, key_prefix="overview"):
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
         st.markdown("**【建議教學步驟的撰寫依據】**")
         st.text_area("建議教學步驟的撰寫依據", value=str(q.get("建議教學步驟的撰寫依據", "") or ""), height=170, key=f"teaching_basis_{q.get('question_no', q.get('題號', ''))}")
-    """True editable structure-review editor.
-
-    v4.5 deliberately initializes widget values in session_state instead of
-    repeatedly passing `value=`. This prevents a rerun from visually restoring
-    the parsed source text while the user is editing.
-    """
+    # True editable structure-review editor.
+    # Widget values are initialized in session_state instead of repeatedly
+    # passing value=, so reruns do not visually overwrite in-progress edits.
     no = q.source_no
 
     def _wk(field):
@@ -5096,34 +5093,229 @@ def _refresh_project_question_visuals_from_source_pdf(
 
 
 def _clear_question_editor_widget_state():
-    """Remove stale UI widget values before a project is restored.
+    """Remove stale per-question UI widget values before another project loads.
 
-    Streamlit text_area/selectbox values live in session_state.  The editor
-    intentionally initializes only when a key does not exist.  Therefore a
-    previous project's overview_single_* values can visually mask the newly
-    restored canonical Question values unless these keys are cleared.
+    Project switching must never reuse the previous project's Streamlit widget
+    state.  Canonical content lives in Question/reference_db; the keys below are
+    only live UI state and are safe to recreate from the newly loaded project.
     """
-    prefixes = (
+    direct_prefixes = (
         "overview_single_",
-        "overview_",
-        "workbench_",
+        "content_editor_",
+        "side_ref_",
+        "side_ref_full_",
+        "side_hist_",
+        "syn_", "lex_", "trans_", "exp_", "focus_", "teach_",
+        "note_", "note_table_",
+        "cat_", "custom_cat_",
+        "wb_reviewed_", "side_wb_reviewed_",
+        "vis_", "side_vis_",
+        "chatgpt_full_import_notice_",
     )
-    explicit_fragments = (
+    overview_fragments = (
         "_material_", "_stem_", "_A_", "_B_", "_C_", "_D_",
         "_group_", "_render_", "_layout_", "_include_image_",
         "_visual_", "_reviewed_", "_sync_group_",
     )
     for key in list(st.session_state.keys()):
         sk = str(key)
-        if sk.startswith("overview_single_"):
-            del st.session_state[key]
+        if sk.startswith(direct_prefixes):
+            st.session_state.pop(key, None)
             continue
-        # Avoid deleting global overview filters; only per-question widget keys.
-        if sk.startswith("overview_") and any(frag in sk for frag in explicit_fragments):
-            del st.session_state[key]
+        # Preserve global overview filters; only clear question-specific widgets.
+        if sk.startswith("overview_") and any(frag in sk for frag in overview_fragments):
+            st.session_state.pop(key, None)
             continue
-        if sk.startswith("workbench_") and any(frag in sk for frag in explicit_fragments):
-            del st.session_state[key]
+        if sk.startswith("workbench_") and any(frag in sk for frag in overview_fragments):
+            st.session_state.pop(key, None)
+
+def _compat_question_blocks_from_source_text(raw_text, expected_count=None):
+    """Conservatively split publisher source text into question blocks.
+
+    This is a compatibility fallback, not the primary parser.  It recognizes:
+    - answer-bearing starts such as （B）1. / ( B ) 1.
+    - plain numbered starts only when the same line visibly looks like a question.
+    It deliberately ignores teaching-step lines such as "1. 引導學生……".
+    """
+    src = _normalize_reference_text(raw_text or "")
+    if not src:
+        return {}
+
+    max_q = int(expected_count or 99)
+    lines = src.splitlines()
+    starts = []
+
+    ans_start = re.compile(
+        r"^[ \t]*[（(][ \t]*[A-DＡ-Ｄ][ \t]*[）)][ \t]*"
+        r"(?P<q>\d{1,2})[ \t]*[.．、][ \t]*(?P<rest>.*)$"
+    )
+    plain_start = re.compile(
+        r"^[ \t]*(?P<q>\d{1,2})[ \t]*[.．、][ \t]*(?P<rest>.+)$"
+    )
+    question_cues = (
+        "下列", "根據", "關於", "何者", "哪一", "請問", "文句", "資料",
+        "敘述", "說明", "最恰當", "最適合", "最接近", "錯誤", "正確",
+    )
+
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            continue
+        m = ans_start.match(s)
+        if m:
+            qno = int(m.group("q"))
+            if 1 <= qno <= max_q:
+                starts.append((i, qno))
+            continue
+
+        m = plain_start.match(s)
+        if not m:
+            continue
+        qno = int(m.group("q"))
+        rest = (m.group("rest") or "").strip()
+        if not (1 <= qno <= max_q):
+            continue
+        # Plain "1. ..." is accepted only if the line is unmistakably a test item.
+        if ("？" in rest or "?" in rest or any(cue in rest[:180] for cue in question_cues)):
+            starts.append((i, qno))
+
+    # De-duplicate same-line/same-q markers.
+    uniq = []
+    seen = set()
+    for pair in starts:
+        if pair not in seen:
+            seen.add(pair)
+            uniq.append(pair)
+    starts = uniq
+
+    out = {}
+    for pos, (line_i, qno) in enumerate(starts):
+        end_i = starts[pos + 1][0] if pos + 1 < len(starts) else len(lines)
+        block = "\n".join(lines[line_i:end_i]).strip()
+        if len(block) < 15:
+            continue
+        old = out.get(str(qno), "")
+        if len(block) > len(old):
+            out[str(qno)] = block
+    return out
+
+
+def _compat_upgrade_reference_db_from_saved_sources(refdb, sources, questions):
+    """Upgrade weak legacy publisher blocks using original files saved in a ZIP.
+
+    Safety guarantees:
+    - never clears a publisher/history category;
+    - never overwrites a block with an empty/less-informative candidate;
+    - does not touch Question objects or any teacher-edited formal content;
+    - works independently of whether the project is an 8成、6–7成 or other set.
+    """
+    refdb = _normalize_legacy_reference_db(
+        refdb, st.session_state.get("year", 115)
+    )
+    sources = sources or {}
+    expected = len(questions or []) or None
+    upgraded = {p: 0 for p in ("翰林", "康軒", "南一")}
+    checked = {p: 0 for p in ("翰林", "康軒", "南一")}
+    errors = []
+
+    prefix_to_pub = {
+        "hanlin_": "翰林",
+        "kangxuan_": "康軒",
+        "nanyi_": "南一",
+    }
+
+    candidates_by_pub = {p: {} for p in ("翰林", "康軒", "南一")}
+
+    for logical_name, item in sources.items():
+        if not isinstance(item, dict):
+            continue
+        pub = None
+        for prefix, p in prefix_to_pub.items():
+            if str(logical_name).startswith(prefix):
+                pub = p
+                break
+        if not pub:
+            continue
+        data = item.get("data")
+        if not isinstance(data, (bytes, bytearray)):
+            continue
+        filename = item.get("filename") or str(logical_name)
+        try:
+            raw = _uploaded_file_text(_MemoryUpload(filename, data))
+            fallback_blocks = _compat_question_blocks_from_source_text(raw, expected)
+
+            # Also retain the primary parser's result; compatibility mode chooses
+            # whichever same-question block has the stronger recognizable analysis.
+            primary, perrs = _parse_publisher_files(
+                [_MemoryUpload(filename, data)],
+                expected,
+                questions,
+                debug_pub_name=pub
+            )
+            errors.extend(perrs or [])
+
+            merged = {}
+            for qno in set(fallback_blocks) | set(primary or {}):
+                opts = []
+                for label, block in (
+                    ("primary", (primary or {}).get(qno, "")),
+                    ("compat", fallback_blocks.get(qno, "")),
+                ):
+                    if not block:
+                        continue
+                    clean = _sanitize_publisher_reference_for_display(block, qno)
+                    ana, method, conf = _publisher_analysis_candidate(clean)
+                    opts.append((bool(ana), len(_norm_cmp_text(ana)), conf, len(clean), label, clean))
+                if opts:
+                    merged[qno] = max(opts, key=lambda x: (x[0], x[1], x[2], x[3]))[-1]
+
+            for qno, block in merged.items():
+                old = (refdb.get("publisher", {}) or {}).get(pub, {}).get(qno, "")
+                old_clean = _sanitize_publisher_reference_for_display(old, qno)
+                old_ana, _, old_conf = _publisher_analysis_candidate(old_clean)
+                new_ana, _, new_conf = _publisher_analysis_candidate(block)
+                checked[pub] += 1
+
+                old_score = (
+                    1 if old_ana else 0,
+                    len(_norm_cmp_text(old_ana)),
+                    float(old_conf or 0),
+                    len(old_clean),
+                )
+                new_score = (
+                    1 if new_ana else 0,
+                    len(_norm_cmp_text(new_ana)),
+                    float(new_conf or 0),
+                    len(block),
+                )
+
+                # Upgrade only when the original saved source is demonstrably better.
+                if new_score > old_score and new_ana:
+                    refdb.setdefault("publisher", {}).setdefault(pub, {})[qno] = block
+                    upgraded[pub] += 1
+        except Exception as e:
+            errors.append(f"{pub}｜{filename}：相容性檢查失敗：{e}")
+
+    if any(upgraded.values()):
+        refdb["reference_parser_version"] = "compat-source-upgrade-v1"
+    return refdb, upgraded, checked, errors
+
+
+def _project_compatibility_snapshot(manifest, refdb, sources, questions, upgraded=None):
+    """Small non-destructive diagnostic shown after loading any project."""
+    inv = _annual_source_inventory(sources)
+    return {
+        "project_app_version": str(manifest.get("app_version", "") or "未知"),
+        "project_format": str(manifest.get("project_format", "") or "未知"),
+        "question_count": len(questions or []),
+        "reference_parser_version": str(refdb.get("reference_parser_version", "") or "未知"),
+        "publisher_counts": {
+            p: len((refdb.get("publisher", {}) or {}).get(p, {}) or {})
+            for p in ("翰林", "康軒", "南一")
+        },
+        "source_inventory": inv,
+        "compat_upgraded": upgraded or {p: 0 for p in ("翰林", "康軒", "南一")},
+    }
 
 
 def _load_annual_project_zip(zip_bytes: bytes):
@@ -5177,6 +5369,23 @@ def _load_annual_project_zip(zip_bytes: bytes):
                     "data": z.read(path),
                 }
         st.session_state.project_sources = restored_sources
+
+        # v6.16.5: universal project compatibility pass.
+        # Original annual sources bundled in the ZIP are used only to UPGRADE
+        # weak/misaligned publisher reference blocks. Existing good blocks and
+        # all teacher-edited Question fields remain untouched.
+        _compat_db, _compat_upgraded, _compat_checked, _compat_errors = (
+            _compat_upgrade_reference_db_from_saved_sources(
+                st.session_state.reference_db,
+                restored_sources,
+                questions,
+            )
+        )
+        st.session_state.reference_db = _compat_db
+        st.session_state["_project_compat_snapshot"] = _project_compatibility_snapshot(
+            manifest, _compat_db, restored_sources, questions, _compat_upgraded
+        )
+        st.session_state["_project_compat_errors"] = _compat_errors
 
         # v6.12.15: refresh source visuals; legacy <=v6.12.10 gets only strong, backed-up parser-damage repairs.
         # Rebuild question visual assets from the ORIGINAL question PDF when available.
@@ -5315,6 +5524,23 @@ with pc1:
             refresh_msg = st.session_state.pop("visual_refresh_message", "")
             if refresh_msg:
                 st.info(refresh_msg)
+
+            _snap = st.session_state.get("_project_compat_snapshot", {}) or {}
+            if _snap:
+                _up = _snap.get("compat_upgraded", {}) or {}
+                st.info(
+                    "專案相容性檢查完成："
+                    f"題數 {_snap.get('question_count', '—')}；"
+                    f"參考庫 翰林 {_snap.get('publisher_counts', {}).get('翰林', 0)}／"
+                    f"康軒 {_snap.get('publisher_counts', {}).get('康軒', 0)}／"
+                    f"南一 {_snap.get('publisher_counts', {}).get('南一', 0)}；"
+                    f"本次由 ZIP 原始檔安全補強：翰林 {_up.get('翰林',0)}、"
+                    f"康軒 {_up.get('康軒',0)}、南一 {_up.get('南一',0)} 題。"
+                )
+                _cerrs = st.session_state.get("_project_compat_errors", []) or []
+                if _cerrs:
+                    with st.expander("查看相容性檢查提醒", expanded=False):
+                        st.write("\n".join(f"- {x}" for x in _cerrs))
 
             inv = info.get("annual_source_inventory", {})
             if not any(inv.values()):
@@ -5690,7 +5916,7 @@ with setup_tab:
 
     if any(annual_inv.values()):
         current_parser = current_ref.get("reference_parser_version")
-        if current_parser not in ("ordered-docx-v2", "ordered-docx-v2-partial-safe"):
+        if current_parser not in ("ordered-docx-v2", "ordered-docx-v2-partial-safe", "compat-source-upgrade-v1"):
             st.warning(
                 "目前參考庫是舊解析器建立的，但這份專案有保存部分／全部原始年度參考檔。"
                 "可用新版順序解析器重建；沒有原始檔的來源會自動保留舊資料，不會被清空。"
