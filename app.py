@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.6 建議稿撰寫依據透明化版"
+APP_VERSION = "Web v6.13.7 建議稿撰寫依據透明化版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2696,14 +2696,28 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None):
                 except Exception:
                     parsed = {}
 
+            # v6.13.7: dedicated publisher explanation PPTX gets priority.
+            # Reason: some teacher-edition DOCX files are visually laid out in columns,
+            # so their extracted paragraph order can separate a question from its explanation.
+            # A publisher "解析" PPTX is usually one-question-per-slide and explicitly contains
+            # 答案／解析／題幹語譯.  Put that block FIRST so downstream explanation extraction
+            # sees the authoritative explanation before any DOCX layout fragments.
+            ext = Path(uploaded.name).suffix.lower()
+            raw_has_explanations = ("解析" in raw and "答案" in raw)
+            prefer_as_explanation_source = (ext == ".pptx" and raw_has_explanations)
+
             for q, block in parsed.items():
                 block = (block or "").strip()
                 if not block:
                     continue
-                if q in combined and block not in combined[q]:
-                    combined[q] += "\n\n" + block
-                elif q not in combined:
+
+                if q not in combined:
                     combined[q] = block
+                elif block not in combined[q]:
+                    if prefer_as_explanation_source:
+                        combined[q] = block + "\n\n" + combined[q]
+                    else:
+                        combined[q] += "\n\n" + block
 
         except Exception as e:
             errors.append(f"{uploaded.name}：{e}")
@@ -3470,7 +3484,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.6 transparent recommendation evidence fields
+    # v6.13.7 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
