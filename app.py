@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.1 簡明 AI 校訂版"
+APP_VERSION = "Web v6.16.2 精簡校對工作台版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2676,7 +2676,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.16.1 hard rule:
+    v6.16.2 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2976,7 +2976,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.16.1: every publisher uses the SAME display/read sanitization path.
+    # v6.16.2: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2993,7 +2993,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.16.1:
+    v6.16.2:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3311,7 +3311,7 @@ def _history_match_score(q, block: str, category: str = ""):
 def _history_examples_for_category(refdb, category: str, limit=6, q=None):
     """Return historical teacher examples ranked by knowledge point, then category.
 
-    v6.16.1: if q is supplied, concrete language-knowledge topic outranks the
+    v6.16.2: if q is supplied, concrete language-knowledge topic outranks the
     broad ability category. Low-relevance records are not promoted as primary
     references.
     """
@@ -3717,7 +3717,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.16.1 transparent recommendation evidence fields
+    # v6.16.2 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4747,114 +4747,6 @@ def _rebuild_reference_db_from_project_sources():
 
 
 
-def _build_ai_review_package(q, refdb, section: str, current_text: str) -> str:
-    """Compact, evidence-grounded AI proofreading package."""
-    pub_parts = []
-    for pub in ["翰林", "康軒", "南一"]:
-        raw = (refdb.get("publisher", {}) or {}).get(pub, {}).get(str(q.source_no), "")
-        clean = _sanitize_publisher_reference_for_display(raw, q.source_no) if raw else ""
-        analysis = ""
-        if clean:
-            try:
-                analysis, _, _, direct = _publisher_best_analysis(refdb, pub, q.source_no)
-                clean = direct or clean
-            except Exception:
-                pass
-        if clean or analysis:
-            pub_parts.append(f"{pub}：{analysis or clean}")
-
-    hist = []
-    try:
-        if q.category:
-            hist = _history_examples_for_category(refdb, q.category, limit=2, q=q)
-    except Exception:
-        hist = []
-
-    rules = {
-        "能力／分析": "確認能力分類是否對準真正考點，並檢查分析是否合理。",
-        "語譯": "確認有無漏譯、誤譯、增譯或不順；關鍵字詞以既有教育部辭典查證優先。",
-        "詳解": "確認答案推論、選項判斷與解釋是否正確、完整且前後一致。",
-        "教學": "確認教學重點是否對準考點，步驟是否清楚、可操作且能遷移到同類題。",
-        "筆記": "確認內容正確且能觸類旁通，不只記本題答案。",
-        "整題總檢": "檢查能力、語譯、詳解、教學與筆記是否互相一致，有無矛盾或知識錯誤。",
-    }
-
-    options = "\n".join(f"({k}) {v}" for k, v in (q.options or {}).items())
-    refs = "\n\n".join(pub_parts) or "無"
-    hist_text = "\n\n".join(f"{label}：{block}" for label, block in hist) or "無"
-
-    return f"""請校對第 {q.source_no} 題的「{section}」。
-
-檢查重點：{rules.get(section, "確認正確性、邏輯性與前後一致。")}
-
-【原題】
-{q.material or ""}
-{q.text or ""}
-{options}
-答案：{q.answer or "—"}
-
-【參考資料】
-{refs}
-
-【歷年相關資料】
-{hist_text}
-
-【字詞查證】
-{getattr(q, "lexical_verification", "") or "無"}
-
-【目前內容】
-{current_text or "（空白）"}
-
-請只用以下格式回答，簡短明確：
-【結論】🟢 可保留／🟡 建議微調／🔴 需要修正
-【問題】沒有問題就寫「無」；有問題最多列 3 點。
-【理由】只說與判斷直接相關的依據，最多 3 點。
-【建議版本】提供可直接貼回的版本；若可保留，直接保留原文。
-
-資料不足時寫「需人工查證」，不要猜。
-"""
-
-
-def _render_ai_review_box(q, refdb, section: str, current_text: str, key_suffix: str):
-    """Compact AI-review UI: one obvious action, details hidden."""
-    package = _build_ai_review_package(q, refdb, section, current_text)
-
-    st.markdown(f"#### 🤖 AI 校訂｜{section}")
-    st.caption("檢查正確性、邏輯與前後一致；不會自動修改你的正式內容。")
-
-    c1, c2 = st.columns([0.72, 0.28])
-    with c1:
-        st.info("把校訂內容貼到 ChatGPT 後，結果只需看：🟢可保留／🟡微調／🔴修正。")
-    with c2:
-        st.download_button(
-            "下載校訂內容",
-            data=package.encode("utf-8"),
-            file_name=f"第{q.source_no}題_{section}_AI校訂.txt",
-            mime="text/plain",
-            key=f"ai_review_download_{key_suffix}_{q.source_no}",
-            use_container_width=True,
-            on_click="ignore"
-        )
-
-    with st.expander("複製給 ChatGPT", expanded=False):
-        st.text_area(
-            "校訂內容",
-            value=package,
-            height=220,
-            key=f"ai_review_pkg_{key_suffix}_{q.source_no}",
-            label_visibility="collapsed",
-            help="Ctrl+A、Ctrl+C 後貼到 ChatGPT。"
-        )
-
-    with st.expander("AI 會怎麼回答？", expanded=False):
-        st.markdown(
-            "**🟢 可保留**：沒有實質問題  \n"
-            "**🟡 建議微調**：內容正確，但有少量可改善處  \n"
-            "**🔴 需要修正**：有知識、邏輯、語譯或教學上的實質問題  \n\n"
-            "回覆只保留：**問題｜理由｜建議版本**。"
-        )
-
-
 def _sync_live_editor_state_to_questions():
     """Persist live Streamlit editor values into Question objects before ZIP export.
 
@@ -4864,7 +4756,7 @@ def _sync_live_editor_state_to_questions():
     contains the user's newest edits, but Question objects may still contain the
     previous values. Without this sync, the ZIP can be one edit behind.
 
-    v6.16.1 syncs only known formal editor fields. Reference/source widgets are
+    v6.16.2 syncs only known formal editor fields. Reference/source widgets are
     intentionally excluded because they are copy-only and must never overwrite
     reference_db.
     """
@@ -5437,7 +5329,7 @@ with pc2:
         )
         st.caption(
             "最簡單的管理方式：每份題本固定一個專案名稱、固定一個 ZIP。"
-            "v6.16.1 下載前會先同步目前畫面最新人工修改，避免專案備份落後一版。"
+            "v6.16.2 下載前會先同步目前畫面最新人工修改，避免專案備份落後一版。"
         )
     else:
         st.info("建立題庫後即可儲存完整年度專案。")
@@ -5541,7 +5433,7 @@ with setup_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.16.1 — hard reset only the annual reference layer.
+    # v6.16.2 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5636,7 +5528,7 @@ with setup_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.16.1: UPDATE semantics, not destructive rebuild semantics.
+        # v6.16.2: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6603,16 +6495,6 @@ with edit_tab:
                     placeholder="字詞｜採用來源｜適用義項／必要說明"
                 )
 
-                _render_ai_review_box(
-                    q, refdb, "能力／分析",
-                    "\n\n".join([
-                        f"最終能力類型：{q.category}",
-                        f"三家比較筆記：{q.synthesis_notes}",
-                        f"字詞查證紀錄：{q.lexical_verification}",
-                    ]),
-                    "analysis"
-                )
-
                 strategy = _strategy_for_category(refdb, q.category or "其他")
                 if q.category:
                     with st.expander("查看本團隊歷年教學框架", expanded=False):
@@ -6649,7 +6531,6 @@ with edit_tab:
                     key=f"trans_{qno}",
                     placeholder="新版 JSON 匯入後，文言文題會自動產生建議語譯；非文言題可留白。"
                 )
-                _render_ai_review_box(q, refdb, "語譯", q.translation, "translation")
 
                 st.markdown("### 建議詳解")
                 _basis_parts = []
@@ -6679,7 +6560,6 @@ with edit_tab:
                     height=420,
                     key=f"exp_{qno}"
                 )
-                _render_ai_review_box(q, refdb, "詳解", q.explanation, "explanation")
 
             with edit_tabs[3]:
                 st.markdown("### 教學重點")
@@ -6694,11 +6574,6 @@ with edit_tab:
                     "建議教學步驟",
                     height=380,
                     key=f"teach_{qno}"
-                )
-                _render_ai_review_box(
-                    q, refdb, "教學",
-                    f"【教學重點】\n{q.teaching_focus}\n\n【教學步驟】\n{q.teaching}",
-                    "teaching"
                 )
 
                 def _apply_strategy_callback():
@@ -6745,23 +6620,7 @@ with edit_tab:
                         "目前表格不是有效的語文知識筆記格式；Word 會略過。"
                     )
 
-                _render_ai_review_box(
-                    q, refdb, "筆記",
-                    f"【筆記策略】\n{q.note_strategy}\n\n【筆記表格】\n{q.note_strategy_table_json}",
-                    "notes"
-                )
-
             st.divider()
-            _whole_text = "\n\n".join([
-                f"【能力類型】\n{q.category}",
-                f"【語譯】\n{getattr(q, 'translation', '')}",
-                f"【詳解】\n{q.explanation}",
-                f"【教學重點】\n{q.teaching_focus}",
-                f"【教學步驟】\n{q.teaching}",
-                f"【筆記策略】\n{q.note_strategy}",
-                f"【筆記表格】\n{q.note_strategy_table_json}",
-            ])
-            _render_ai_review_box(q, refdb, "整題總檢", _whole_text, "whole")
 
             _c1, _c2 = st.columns(2)
             with _c1:
