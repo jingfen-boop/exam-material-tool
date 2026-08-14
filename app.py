@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.14 三家出版社統一顯示端題界清理修正版"
+APP_VERSION = "Web v6.13.15 題本專案命名與獨立備份修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2674,7 +2674,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.13.14 hard rule:
+    v6.13.15 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2974,7 +2974,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.13.14: every publisher uses the SAME display/read sanitization path.
+    # v6.13.15: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2991,7 +2991,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.13.14:
+    v6.13.15:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3640,7 +3640,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.14 transparent recommendation evidence fields
+    # v6.13.15 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4657,6 +4657,7 @@ def _build_annual_project_zip():
         "project_format": "exam-material-tool-project-v1",
         "app_version": APP_VERSION,
         "year": int(st.session_state.get("year", 115)),
+        "project_name": str(st.session_state.get("project_name", "") or "").strip(),
         "settings": _collect_project_settings(),
         "questions": [_question_to_project_dict(q) for q in questions],
         "reference_db": _json_safe(refdb),
@@ -4948,6 +4949,9 @@ def _load_annual_project_zip(zip_bytes: bytes):
 
         st.session_state.questions = questions
         st.session_state.year = int(manifest.get("year", 115))
+        st.session_state.project_name = str(
+            manifest.get("project_name", "") or f"{st.session_state.year}會考題本"
+        ).strip()
         legacy_refdb = manifest.get(
             "reference_db",
             _empty_reference_db(st.session_state.year)
@@ -5048,6 +5052,8 @@ if "project_sources" not in st.session_state:
     st.session_state.project_sources = {}
 if "year" not in st.session_state:
     st.session_state.year = 115
+if "project_name" not in st.session_state:
+    st.session_state.project_name = ""
 
 with st.sidebar:
     st.header("設定")
@@ -5056,19 +5062,38 @@ with st.sidebar:
     st.caption("本版不使用任何外部 AI API，不需要 API Key，也不會產生 API 費用。")
 
 
-st.markdown("### 💾 年度專案")
+def _safe_project_filename(name: str, year: int) -> str:
+    name = (name or "").strip() or f"{year}會考題本"
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name)
+    name = re.sub(r"\s+", "_", name).strip("._ ")
+    return (name[:80] or f"{year}會考題本") + "_專案備份.zip"
+
+
+st.markdown("### 💾 題本專案")
+st.caption(
+    "不同題本請使用不同「專案名稱」並各自下載一份 ZIP。"
+    "ZIP 會保存該題本的題庫、選題、人工編輯、詳解、ChatGPT 分析結果、圖片與參考庫；"
+    "下次只要載入對應 ZIP 即可續作。"
+)
+st.session_state.project_name = st.text_input(
+    "目前題本專案名稱",
+    value=str(st.session_state.get("project_name", "") or ""),
+    placeholder=f"例如：{int(st.session_state.year)}會考_六成至七成",
+    help="建議每一份題本使用不同名稱。名稱會自動放進備份 ZIP 檔名，也會寫入 ZIP 內。"
+).strip()
+
 pc1, pc2 = st.columns([1.05, 0.95])
 
 with pc1:
     project_upload = st.file_uploader(
-        "載入年度專案 ZIP",
+        "載入題本專案 ZIP",
         type=["zip"],
         key="annual_project_zip_upload",
         help="一次恢復題庫、校對、選題、詳解、年度參考庫與設定。"
     )
     st.caption("若你昨天已下載「工作進度 ZIP」或「年度專案 ZIP」，今天直接從這裡載入即可。")
     if st.button(
-        "📂 載入年度專案",
+        "📂 載入題本專案",
         disabled=not project_upload,
         key="load_annual_project_zip",
         use_container_width=True
@@ -5076,7 +5101,7 @@ with pc1:
         try:
             info = _load_annual_project_zip(project_upload.getvalue())
             st.success(
-                f"已恢復 {info['year']} 年度專案：{info['questions']} 題；"
+                f"已恢復「{st.session_state.get('project_name') or str(info['year'])+'會考題本'}」：{info['questions']} 題；"
                 f"翰林 {info['publishers']['翰林']}、康軒 {info['publishers']['康軒']}、"
                 f"南一 {info['publishers']['南一']} 題；內部參考 {info['history_files']} 份。"
             )
@@ -5098,14 +5123,20 @@ with pc2:
     if st.session_state.questions:
         project_zip_bytes = _build_annual_project_zip()
         st.download_button(
-            "📦 儲存／備份完整年度專案 ZIP",
+            "📦 下載目前題本專案備份 ZIP",
             data=project_zip_bytes,
-            file_name=f"{int(st.session_state.year)}_會考教材年度專案.zip",
+            file_name=_safe_project_filename(
+                st.session_state.get("project_name", ""),
+                int(st.session_state.year)
+            ),
             mime="application/zip",
             use_container_width=True,
-            help="建議每次完成一批校對／選題／詳解後下載一次。之後換程式版本只需載入這一個檔案。"
+            help="每份題本各下載自己的 ZIP；下次只要載入該 ZIP 即可恢復這份題本。"
         )
-        st.caption("此 ZIP 同時是「改版備份」與「跨天續作存檔」；不用重新上傳資料或重做選題。")
+        st.caption(
+            "最簡單的管理方式：每份題本固定一個專案名稱、固定一個 ZIP。"
+            "完成重要修改後重新下載並取代該題本舊備份即可。"
+        )
     else:
         st.info("建立題庫後即可儲存完整年度專案。")
 
@@ -5144,7 +5175,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.13.14 — hard reset only the annual reference layer.
+    # v6.13.15 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5239,7 +5270,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.13.14: UPDATE semantics, not destructive rebuild semantics.
+        # v6.13.15: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6379,7 +6410,7 @@ with tab3:
                                     "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
                                 )
 
-                        # v6.13.14: reference source is display-only. Include a
+                        # v6.13.15: reference source is display-only. Include a
                         # content signature in widget keys so Streamlit can never
                         # reuse a stale blank value after the reference DB changes.
                         _ref_sig = hashlib.md5(
