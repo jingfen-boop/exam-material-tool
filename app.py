@@ -22,7 +22,20 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.4 內部教師版確定配對＋來源缺漏提示版"
+APP_VERSION = "Web v6.13.6 建議稿撰寫依據透明化版"
+
+
+RECOMMENDATION_EVIDENCE_RULE = """
+【建議稿撰寫依據規則】
+1. 在「建議詳解」之前，必須先輸出「建議詳解的撰寫依據」。
+2. 在「建議教學步驟」之前，必須先輸出「建議教學步驟的撰寫依據」。
+3. 撰寫依據不能只列來源名稱；必須寫出該來源實際支持本題建議的具體內容、判斷或教學做法。
+4. 只有實際成功擷取且本次確實使用的來源才可列為「已參考」。
+5. 某出版社或歷年教師版若未成功擷取到內容，必須明示「未擷取到可供參考的完整內容」，不得假稱已參考。
+6. 建議詳解的依據優先序：官方答案／原題 → 三家出版社實際詳解 → 本團隊歷年同能力類型教師版 → 必要時教育部辭典。
+7. 建議教學步驟的依據優先以本團隊歷年同能力類型教師版之教學重點、教學步驟、筆記策略為核心，再吸收出版社詳解中可轉化為教學操作的資訊。
+8. 最終建議必須重新依本團隊歷年寫法整合，不得過度貼近任一家出版社的句型、順序或措辭。
+"""
 
 # -----------------------------
 # Models
@@ -2731,99 +2744,106 @@ def _dedupe_consecutive_chunks(chunks):
     return out
 
 def _legacy_history_reconstructed_records(raw: str):
-    """Deterministically rebuild old internal teacher editions.
+    """Precisely rebuild old internal teacher editions.
 
-    Verified legacy structure in the user's current project:
-      [question 1 ... question N] -> [解析1 ... 解析N]
+    Verified legacy source order can look like:
+        Q1題目
+        Q2題目開頭
+        解析：<其實是Q1解析>
+        教學重點...
+        教學步驟...
+        ...
 
-    The old parser placed all Word table content after all normal paragraphs.
-    Therefore question-number proximity CANNOT recover teacher content.
-    The only reliable legacy mapping is sequence-to-sequence:
-      metadata #1 <-> 解析 #1, metadata #2 <-> 解析 #2, ...
-
-    We activate this route only when the source contains a plausible equal
-    sequence of question metadata and 解析 blocks.
+    The old Word parser did not preserve visual table order, so metadata proximity
+    is unreliable.  We therefore use two independent ordered sequences:
+      A. answer-bearing question starts: （C）1. / （C）2. / ...
+      B. teacher blocks beginning with 解析：
+    and pair them by source order only when counts are reliable.
     """
-    raw=_normalize_reference_text(raw or "")
+    raw = _normalize_reference_text(raw or "")
     if not raw:
         return []
 
-    cats=[c for c in ABILITY_OPTIONS if c and c!="其他"]
-    cat_alt="|".join(re.escape(c) for c in cats)
+    cats = [c for c in ABILITY_OPTIONS if c and c != "其他"]
+    cat_alt = "|".join(re.escape(c) for c in cats)
 
-    # Flexible around hyphens / spaces / rate/category ordering seen in legacy files.
-    meta_re=re.compile(
+    meta_re = re.compile(
         rf"(?P<year>\d{{3}})\s*會考\s*[-－—]?\s*"
         rf"(?P<qno>\d{{1,2}})\s*"
         rf"(?P<rate>0\.\d+)?\s*"
         rf"(?P<category>{cat_alt})"
     )
-    metas=list(meta_re.finditer(raw))
+    metas = list(meta_re.finditer(raw))
 
-    analysis_re=re.compile(
+    analysis_re = re.compile(
         r"(?m)^[ \t]*(?:【[ \t]*)?解析(?:[ \t]*】)?[ \t]*[：:][ \t]*"
     )
-    analyses=list(analysis_re.finditer(raw))
+    analyses = list(analysis_re.finditer(raw))
 
     if not metas or not analyses:
         return []
 
-    # Legacy "all questions first" requires the first analysis to occur after
-    # the last question metadata.
-    if analyses[0].start() <= metas[-1].start():
-        return []
+    first_analysis_pos = analyses[0].start()
 
-    # This is the strongest correctness check. If counts differ substantially,
-    # do not guess.
-    if len(metas) != len(analyses):
-        return []
-
-    question_area_end=analyses[0].start()
-
-    # Answer-bearing question-start pattern, deliberately tolerant of spaces,
-    # full-width brackets and tabs from Word exports.
-    qstart_re=re.compile(
+    # All question starts before the first teacher-analysis block.
+    qstart_re = re.compile(
         r"(?m)^[ \t]*[（(][ \t]*[A-DＡ-Ｄ][ \t]*[）)][ \t]*"
         r"(?P<num>\d{1,2})[ \t]*[.．、][ \t]*"
     )
-    qstarts=[m for m in qstart_re.finditer(raw[:question_area_end])]
+    qstarts = [m for m in qstart_re.finditer(raw[:first_analysis_pos])]
 
-    records=[]
-    for i,meta in enumerate(metas):
-        qno=int(meta.group("qno"))
+    # We only use this deterministic legacy route when the sequences are coherent.
+    # Some historical files may omit a teacher box; in that case fall back to
+    # the normal parser rather than guessing.
+    if len(metas) != len(analyses):
+        return []
+    if len(qstarts) < len(metas):
+        return []
 
-        # Find the nearest answer-bearing start for the SAME number before metadata.
-        same=[m for m in qstarts if int(m.group("num"))==qno and m.start()<=meta.start()]
-        if same:
-            q_start=same[-1].start()
+    # Match each metadata item to the nearest preceding question start with the
+    # same original number.  This gives the precise question boundary.
+    matched_qstarts = []
+    last_pos = -1
+    for meta in metas:
+        qno = int(meta.group("qno"))
+        candidates = [
+            m for m in qstarts
+            if int(m.group("num")) == qno
+            and m.start() <= meta.start()
+            and m.start() > last_pos
+        ]
+        if not candidates:
+            return []
+        chosen = candidates[-1]
+        matched_qstarts.append(chosen)
+        last_pos = chosen.start()
+
+    records = []
+    for i, meta in enumerate(metas):
+        q_start = matched_qstarts[i].start()
+
+        # CRITICAL: end the question at the NEXT real question start,
+        # never at the next metadata marker.  This removes Q2 text from Q1.
+        if i + 1 < len(matched_qstarts):
+            q_end = matched_qstarts[i + 1].start()
         else:
-            # Still never return the whole source. Use a bounded local question window.
-            q_start=max(0, raw.rfind("\n", max(0, meta.start()-1200), meta.start()))
-            if q_start<0:
-                q_start=max(0,meta.start()-800)
+            q_end = first_analysis_pos
 
-        if i+1<len(metas):
-            next_meta=metas[i+1]
-            same_next=[m for m in qstarts if int(m.group("num"))==int(next_meta.group("qno"))
-                       and m.start()>=meta.end() and m.start()<=next_meta.start()]
-            q_end=same_next[0].start() if same_next else next_meta.start()
-        else:
-            q_end=question_area_end
+        question = raw[q_start:q_end].strip()
 
-        question=raw[q_start:q_end].strip()
-
-        a_start=analyses[i].start()
-        a_end=analyses[i+1].start() if i+1<len(analyses) else len(raw)
-        teacher=raw[a_start:a_end].strip()
+        # Teacher boxes are a second independent sequence.
+        a_start = analyses[i].start()
+        a_end = analyses[i + 1].start() if i + 1 < len(analyses) else len(raw)
+        teacher = raw[a_start:a_end].strip()
 
         records.append({
-            "year":meta.group("year"),
-            "qno":str(qno),
-            "category":meta.group("category"),
-            "question":question,
-            "teacher_chunk":teacher,
-            "text":(question+"\n"+teacher).strip(),
-            "legacy_sequence_rebuilt":True,
+            "year": meta.group("year"),
+            "qno": str(meta.group("qno")),
+            "category": meta.group("category"),
+            "question": question,
+            "teacher_chunk": teacher,
+            "text": (question + "\n" + teacher).strip(),
+            "legacy_sequence_rebuilt": True,
         })
 
     return records
@@ -3099,30 +3119,41 @@ def _history_examples_for_category(refdb, category: str, limit=6):
     return out
 
 def _history_teacher_sections(block: str):
-    """Extract only the fields the user needs for comparison, without changing source data."""
+    """Extract internal teacher fields from one reconstructed historical item."""
     src = _normalize_reference_text(block or "").strip()
 
-    labels = {
-        "analysis": ("解析", "詳解", "試題解析"),
-        "focus": ("教學重點",),
-        "teaching": ("教學步驟", "建議教學步驟"),
-        "note": ("筆記策略",),
-    }
+    label_defs = [
+        ("analysis", ("解析", "詳解", "試題解析")),
+        ("focus", ("教學重點",)),
+        ("teaching", ("教學步驟", "建議教學步驟", "試題分析")),
+        ("note", ("筆記策略",)),
+    ]
 
     positions = []
-    for key, names in labels.items():
+    for key, names in label_defs:
+        best = None
         for name in names:
+            # NOTE: \n here is a REAL newline regex escape.
+            # v6.13.4 accidentally had \\n, so headings after line breaks
+            # were never detected.
             m = re.search(
-                rf"(?:^|\\n)\\s*【?\\s*{re.escape(name)}\\s*】?\\s*[：:]?\\s*",
+                rf"(?:^|\n)\s*【?\s*{re.escape(name)}\s*】?\s*[：:]?\s*",
                 src,
                 flags=re.M
             )
-            if m:
-                positions.append((m.start(), m.end(), key))
-                break
+            if m and (best is None or m.start() < best.start()):
+                best = m
+        if best:
+            positions.append((best.start(), best.end(), key))
 
     positions.sort(key=lambda x: x[0])
-    out = {"question": src, "analysis": "", "focus": "", "teaching": "", "note": ""}
+    out = {
+        "question": src,
+        "analysis": "",
+        "focus": "",
+        "teaching": "",
+        "note": ""
+    }
 
     if not positions:
         return out
@@ -3130,11 +3161,14 @@ def _history_teacher_sections(block: str):
     out["question"] = src[:positions[0][0]].strip()
 
     for i, (pos, content_start, key) in enumerate(positions):
-        content_end = positions[i+1][0] if i + 1 < len(positions) else len(src)
-        out[key] = src[content_start:content_end].strip()
+        content_end = positions[i + 1][0] if i + 1 < len(positions) else len(src)
+        content = src[content_start:content_end].strip()
+        # If the same field appears twice because of malformed old DOCX table text,
+        # keep the longer useful version.
+        if len(content) > len(out.get(key, "")):
+            out[key] = content
 
     return out
-
 
 def _historical_category_evidence(refdb, per_category=2):
     """Build compact evidence showing how existing internal categories appeared in past teacher editions."""
@@ -3352,7 +3386,96 @@ def _render_word_question_preview(q, material, stem, oa, ob, oc, od,
         import streamlit.components.v1 as components
         components.html(html_doc, height=430, scrolling=False)
 
+def _build_recommendation_evidence(q, publisher_refs=None, history_refs=None):
+    """Build transparent evidence blocks for suggested explanation/teaching steps.
+    Only list sources that actually contain usable extracted content.
+    """
+    publisher_refs = publisher_refs or {}
+    history_refs = history_refs or []
+
+    def clean(v):
+        return _normalize_reference_text(str(v or "")).strip()
+
+    explanation = []
+    teaching = []
+
+    # Original question / official answer
+    qtext = clean(q.get("題幹") or q.get("question") or q.get("題目"))
+    ans = clean(q.get("官方答案") or q.get("answer") or q.get("答案"))
+    if qtext or ans:
+        detail = []
+        if ans:
+            detail.append(f"官方答案：{ans}")
+        if qtext:
+            detail.append("以本題題幹、選項與作答任務作為第一層判斷依據")
+        explanation.append(("官方答案／原題", "；".join(detail)))
+
+    # Publishers: include ONLY actually extracted explanation text.
+    for pub in ("翰林", "康軒", "南一"):
+        val = publisher_refs.get(pub)
+        if isinstance(val, dict):
+            val = val.get("analysis") or val.get("explanation") or val.get("詳解") or ""
+        val = clean(val)
+        if val:
+            explanation.append((f"{pub}詳解", val))
+            teaching.append((f"{pub}詳解可轉化的教學資訊", val))
+
+    # Historical internal teacher editions: use actual parsed sections.
+    for idx, ref in enumerate(history_refs, 1):
+        if not isinstance(ref, dict):
+            continue
+        source = clean(ref.get("source") or ref.get("title") or f"歷年教師版{idx}")
+        analysis = clean(ref.get("analysis"))
+        focus = clean(ref.get("focus"))
+        steps = clean(ref.get("teaching"))
+        note = clean(ref.get("note"))
+
+        if analysis:
+            explanation.append((f"本團隊歷年教師版｜{source}", analysis))
+        teach_parts = []
+        if focus:
+            teach_parts.append("教學重點：" + focus)
+        if steps:
+            teach_parts.append("教學步驟：" + steps)
+        if note:
+            teach_parts.append("筆記策略：" + note)
+        if teach_parts:
+            teaching.append((f"本團隊歷年教師版｜{source}", "\n".join(teach_parts)))
+
+    # Dictionary evidence is relevant to explanation only when actually present.
+    dictionary = clean(q.get("字詞查證紀錄"))
+    if dictionary and "無需字詞查證" not in dictionary:
+        explanation.append(("教育部辭典／字詞查證", dictionary))
+
+    return explanation, teaching
+
+
+def _render_evidence_block(title, evidence):
+    st.markdown(f"**【{title}】**")
+    if not evidence:
+        st.info("目前沒有成功擷取到可供本項建議引用的具體來源內容；不自動宣稱已參考未擷取資料。")
+        return
+    for source, content in evidence:
+        content = _normalize_reference_text(content or "").strip()
+        if not content:
+            continue
+        st.markdown(f"- **{source}**")
+        st.text_area(
+            f"{source}｜具體內容",
+            value=content,
+            height=min(220, max(90, 55 + len(content) // 3)),
+            disabled=True,
+            key=f"evidence_{title}_{source}_{abs(hash(content))}"
+        )
+
 def _render_question_review_editor(q, key_prefix="overview"):
+
+    # v6.13.6 transparent recommendation evidence fields
+    if isinstance(q, dict):
+        st.markdown("**【建議詳解的撰寫依據】**")
+        st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
+        st.markdown("**【建議教學步驟的撰寫依據】**")
+        st.text_area("建議教學步驟的撰寫依據", value=str(q.get("建議教學步驟的撰寫依據", "") or ""), height=170, key=f"teaching_basis_{q.get('question_no', q.get('題號', ''))}")
     """True editable structure-review editor.
 
     v4.5 deliberately initializes widget values in session_state instead of
@@ -6014,7 +6137,15 @@ with tab3:
                         sections = _history_teacher_sections(excerpt)
                         st.markdown(f"**{source}**")
                         if "舊檔重組" in source:
-                            st.success("🟢 已依舊檔「題目順序 ↔ 解析順序」重新配對本題，不再顯示整份題本。")
+                            got = []
+                            if sections.get("analysis"): got.append("解析")
+                            if sections.get("focus"): got.append("教學重點")
+                            if sections.get("teaching"): got.append("教學步驟")
+                            if sections.get("note"): got.append("筆記策略")
+                            st.success(
+                                "🟢 已重新配對本題；目前實際擷取到："
+                                + ("／".join(got) if got else "尚未辨識到教師欄位")
+                            )
 
                         with st.expander("題目", expanded=False):
                             st.text_area(
