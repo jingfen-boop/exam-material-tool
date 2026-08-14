@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.15 題本專案命名與獨立備份修正版"
+APP_VERSION = "Web v6.14.0 詳解校對參考強化版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2674,7 +2674,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.13.15 hard rule:
+    v6.14.0 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2974,7 +2974,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.13.15: every publisher uses the SAME display/read sanitization path.
+    # v6.14.0: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2991,7 +2991,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.13.15:
+    v6.14.0:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3640,7 +3640,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.15 transparent recommendation evidence fields
+    # v6.14.0 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -5175,7 +5175,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.13.15 — hard reset only the annual reference layer.
+    # v6.14.0 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5270,7 +5270,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.13.15: UPDATE semantics, not destructive rebuild semantics.
+        # v6.14.0: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6364,77 +6364,183 @@ with tab3:
                 st.image(q.crop_png, caption="原 PDF 題目區塊", use_container_width=True)
 
         with right:
-            st.markdown("### 一、三家出版社原始詳解")
+            st.markdown("### 🔎 校對參考總覽")
             st.caption(
-                "維持原本三家並列介面，只改善完整度：優先顯示本題完整詳解；"
-                "翰林、康軒、南一現在統一先做題界清理，再顯示本題來源；"
-                "若需要核對題目或原始來源，可展開查看清理後的完整題塊。"
+                "校對詳解與教學步驟時，右側固定提供三家出版社解析、歷年同題型教師版與 ChatGPT 撰寫依據。"
+                "以下內容全部沿用既有資料與既有辨識結果，不重新改寫來源。"
             )
-            pub_tabs = st.tabs(["翰林", "康軒", "南一"])
-            for ptab, pub in zip(pub_tabs, ["翰林", "康軒", "南一"]):
-                with ptab:
-                    raw_block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
-                    block = _sanitize_publisher_reference_for_display(raw_block, q.source_no)
-                    if block:
-                        full_analysis, detect_method, detect_confidence, direct_block = _publisher_best_analysis(
-                            refdb, pub, q.source_no
-                        )
-                        # direct_block is already sanitized through the same common path.
-                        block = direct_block or block
 
-                        if detect_method.startswith("heading:"):
-                            st.success("🟢 已辨識完整詳解（來源有明確詳解／解析標題）")
-                        elif detect_method == "heuristic-markerless":
-                            st.info(
-                                f"🔵 已辨識無標題詳解（格式推定信心 {detect_confidence:.0%}）。"
-                                "請以來源原文核對；程式沒有新增任何出版社原文中不存在的內容。"
+            _review_tabs = st.tabs(["三家出版社", "歷年同題型教師版", "ChatGPT 建議／依據"])
+
+            with _review_tabs[0]:
+                st.markdown("### 一、三家出版社原始詳解")
+                st.caption(
+                    "維持原本三家並列介面，只改善完整度：優先顯示本題完整詳解；"
+                    "翰林、康軒、南一現在統一先做題界清理，再顯示本題來源；"
+                    "若需要核對題目或原始來源，可展開查看清理後的完整題塊。"
+                )
+                pub_tabs = st.tabs(["翰林", "康軒", "南一"])
+                for ptab, pub in zip(pub_tabs, ["翰林", "康軒", "南一"]):
+                    with ptab:
+                        raw_block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
+                        block = _sanitize_publisher_reference_for_display(raw_block, q.source_no)
+                        if block:
+                            full_analysis, detect_method, detect_confidence, direct_block = _publisher_best_analysis(
+                                refdb, pub, q.source_no
                             )
-                        elif detect_method == "legacy-orphan-recovered":
-                            st.info(
-                                "🔷 已從舊參考庫其他區塊找回本題詳解。"
-                                "表示舊版把詳解存到錯誤題號區塊；新版只重新配對既有原文。"
-                            )
-                        else:
-                            saved_sources = st.session_state.get("project_sources", {}) or {}
-                            pub_prefix = {"翰林":"hanlin_", "康軒":"kangxuan_", "南一":"nanyi_"}[pub]
-                            has_original = any(str(k).startswith(pub_prefix) for k in saved_sources.keys())
-                            if has_original:
-                                st.warning(
-                                    "🟡 本題目前未可靠辨識到詳解，但專案中有保存這一家原始來源檔；"
-                                    "可回②年度資料執行重新建立參考庫。"
+                            # direct_block is already sanitized through the same common path.
+                            block = direct_block or block
+
+                            if detect_method.startswith("heading:"):
+                                st.success("🟢 已辨識完整詳解（來源有明確詳解／解析標題）")
+                            elif detect_method == "heuristic-markerless":
+                                st.info(
+                                    f"🔵 已辨識無標題詳解（格式推定信心 {detect_confidence:.0%}）。"
+                                    "請以來源原文核對；程式沒有新增任何出版社原文中不存在的內容。"
+                                )
+                            elif detect_method == "legacy-orphan-recovered":
+                                st.info(
+                                    "🔷 已從舊參考庫其他區塊找回本題詳解。"
+                                    "表示舊版把詳解存到錯誤題號區塊；新版只重新配對既有原文。"
                                 )
                             else:
-                                st.warning(
-                                    "🟠 目前這份舊專案 ZIP 沒有保存這一家出版社的原始來源檔，"
-                                    "而既有參考庫中也找不到本題詳解文字。"
-                                    "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
-                                )
+                                saved_sources = st.session_state.get("project_sources", {}) or {}
+                                pub_prefix = {"翰林":"hanlin_", "康軒":"kangxuan_", "南一":"nanyi_"}[pub]
+                                has_original = any(str(k).startswith(pub_prefix) for k in saved_sources.keys())
+                                if has_original:
+                                    st.warning(
+                                        "🟡 本題目前未可靠辨識到詳解，但專案中有保存這一家原始來源檔；"
+                                        "可回②年度資料執行重新建立參考庫。"
+                                    )
+                                else:
+                                    st.warning(
+                                        "🟠 目前這份舊專案 ZIP 沒有保存這一家出版社的原始來源檔，"
+                                        "而既有參考庫中也找不到本題詳解文字。"
+                                        "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
+                                    )
 
-                        # v6.13.15: reference source is display-only. Include a
-                        # content signature in widget keys so Streamlit can never
-                        # reuse a stale blank value after the reference DB changes.
-                        _ref_sig = hashlib.md5(
-                            (str(block) + "\n" + str(full_analysis)).encode("utf-8", errors="ignore")
-                        ).hexdigest()[:10]
-                        st.text_area(
-                            f"{pub}第{q.source_no}題完整詳解",
-                            value=full_analysis or "（目前沒有可可靠辨識的詳解內容）",
-                            height=360,
-                            key=f"ref_{pub}_{qno}_{_ref_sig}",
-                            label_visibility="collapsed",
-                            disabled=True
-                        )
-                        with st.expander("查看本題完整來源", expanded=False):
+                            # v6.14.0: reference source is display-only. Include a
+                            # content signature in widget keys so Streamlit can never
+                            # reuse a stale blank value after the reference DB changes.
+                            _ref_sig = hashlib.md5(
+                                (str(block) + "\n" + str(full_analysis)).encode("utf-8", errors="ignore")
+                            ).hexdigest()[:10]
                             st.text_area(
-                                f"{pub}第{q.source_no}題完整來源",
-                                value=block,
-                                height=420,
-                                key=f"ref_full_{pub}_{qno}_{_ref_sig}",
+                                f"{pub}第{q.source_no}題完整詳解",
+                                value=full_analysis or "（目前沒有可可靠辨識的詳解內容）",
+                                height=360,
+                                key=f"ref_{pub}_{qno}_{_ref_sig}",
                                 label_visibility="collapsed",
                                 disabled=True
                             )
-                    else:
-                        st.info("目前年度參考庫沒有辨識到這一題，請回「① 年度資料」檢查來源檔。")
+                            with st.expander("查看本題完整來源", expanded=False):
+                                st.text_area(
+                                    f"{pub}第{q.source_no}題完整來源",
+                                    value=block,
+                                    height=420,
+                                    key=f"ref_full_{pub}_{qno}_{_ref_sig}",
+                                    label_visibility="collapsed",
+                                    disabled=True
+                                )
+                        else:
+                            st.info("目前年度參考庫沒有辨識到這一題，請回「① 年度資料」檢查來源檔。")
+
+
+            with _review_tabs[1]:
+                _review_category = q.category or getattr(q, "suggested_category", "") or ""
+                if _review_category:
+                    st.info(f"目前以能力類型「{_review_category}」尋找歷年教師版對應內容。")
+                    _review_examples = _history_examples_for_category(refdb, _review_category)
+                    if not _review_examples:
+                        st.caption("目前參考庫沒有找到同能力類型的歷年教師版題目。")
+                    for _ri, (_source, _excerpt) in enumerate(_review_examples, 1):
+                        _sec = _history_teacher_sections(_excerpt)
+                        with st.expander(f"{_source}", expanded=(_ri <= 2)):
+                            st.markdown("**題目**")
+                            st.text_area(
+                                f"review_hist_q_{qno}_{_ri}",
+                                value=_sec.get("question") or "（未擷取到題目）",
+                                height=130, disabled=True,
+                                key=f"review_hist_q_{qno}_{_ri}",
+                                label_visibility="collapsed"
+                            )
+                            st.markdown("**解析**")
+                            st.text_area(
+                                f"review_hist_exp_{qno}_{_ri}",
+                                value=_sec.get("analysis") or "（來源中目前未成功擷取到解析）",
+                                height=180, disabled=True,
+                                key=f"review_hist_exp_{qno}_{_ri}",
+                                label_visibility="collapsed"
+                            )
+                            _hc1, _hc2 = st.columns(2)
+                            with _hc1:
+                                st.markdown("**教學重點**")
+                                st.text_area(
+                                    f"review_hist_focus_{qno}_{_ri}",
+                                    value=_sec.get("focus") or "（來源中目前未成功擷取到教學重點）",
+                                    height=150, disabled=True,
+                                    key=f"review_hist_focus_{qno}_{_ri}",
+                                    label_visibility="collapsed"
+                                )
+                            with _hc2:
+                                st.markdown("**教學步驟**")
+                                st.text_area(
+                                    f"review_hist_teach_{qno}_{_ri}",
+                                    value=_sec.get("teaching") or "（來源中目前未成功擷取到教學步驟）",
+                                    height=210, disabled=True,
+                                    key=f"review_hist_teach_{qno}_{_ri}",
+                                    label_visibility="collapsed"
+                                )
+                            if _sec.get("note"):
+                                st.markdown("**筆記策略**")
+                                st.text_area(
+                                    f"review_hist_note_{qno}_{_ri}",
+                                    value=_sec.get("note", ""),
+                                    height=150, disabled=True,
+                                    key=f"review_hist_note_{qno}_{_ri}",
+                                    label_visibility="collapsed"
+                                )
+                else:
+                    st.caption("請先確認本題能力類型，才能精準列出歷年同題型教師版。")
+
+            with _review_tabs[2]:
+                st.markdown("**本題 ChatGPT 分析／撰寫依據**")
+                st.caption(
+                    "只顯示目前專案／JSON 已經保存的內容；沒有的欄位不會自行補造。"
+                )
+                _basis_parts = []
+                if getattr(q, "category_reason", ""):
+                    _basis_parts.append("【能力類型判斷理由】\\n" + q.category_reason)
+                if getattr(q, "synthesis_notes", ""):
+                    _basis_parts.append("【三家比較／綜合筆記】\\n" + q.synthesis_notes)
+                if getattr(q, "lexical_verification", ""):
+                    _basis_parts.append("【字詞查證紀錄】\\n" + q.lexical_verification)
+                st.text_area(
+                    "ChatGPT 建議依據",
+                    value="\\n\\n".join(_basis_parts) or "（目前專案中沒有可顯示的建議依據內容）",
+                    height=260, disabled=True,
+                    key=f"review_ai_basis_{qno}",
+                    label_visibility="collapsed"
+                )
+                _ac1, _ac2 = st.columns(2)
+                with _ac1:
+                    st.markdown("**目前建議詳解**")
+                    st.text_area(
+                        f"review_ai_exp_{qno}",
+                        value=getattr(q, "explanation", "") or "（尚無）",
+                        height=230, disabled=True,
+                        key=f"review_ai_exp_{qno}",
+                        label_visibility="collapsed"
+                    )
+                with _ac2:
+                    st.markdown("**目前建議教學步驟**")
+                    st.text_area(
+                        f"review_ai_teach_{qno}",
+                        value=getattr(q, "teaching", "") or "（尚無）",
+                        height=230, disabled=True,
+                        key=f"review_ai_teach_{qno}",
+                        label_visibility="collapsed"
+                    )
 
             # v6.4: after JSON import, synchronize the Question model into
             # widget state BEFORE those widgets are instantiated in this rerun.
