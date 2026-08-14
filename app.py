@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.12.17 取消短題隱藏表格版"
+APP_VERSION = "Web v6.13.2 出版社無標題詳解辨識加強版"
 
 # -----------------------------
 # Models
@@ -2624,11 +2624,30 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 
         block_parts = [ch]
 
-        # In PPT exports the explanation can be on the immediately following slide.
-        # Append at most two continuation slides only when they look like explanation pages.
-        for j in range(idx + 1, min(idx + 3, len(chunks))):
+        # Publisher continuation can be an explanation slide WITHOUT a literal
+        # "詳解／解析" heading. Append nearby chunks when they contain either
+        # explicit explanation labels OR strong explanatory discourse.
+        for j in range(idx + 1, min(idx + 4, len(chunks))):
             nxt = chunks[j]
-            if any(k in nxt for k in ("詳解", "解析", "對應教材", "語譯")):
+            explicit = any(
+                k in nxt for k in
+                ("詳解", "解析", "試題解析", "對應教材", "語譯", "解題")
+            )
+            discourse_hits = sum(
+                1 for k in
+                ("可知", "可見", "故選", "故答案", "因此", "所以", "意指",
+                 "表示", "符合", "不符合", "應為", "應讀", "文中")
+                if k in nxt
+            )
+            # Avoid swallowing a clearly new question slide.
+            looks_new_question = bool(
+                re.search(
+                    r"(?m)^\s*(?:[（(]\s*[A-DＡ-Ｄ]?\s*[）)]\s*)?"
+                    r"\d{1,2}[.、．]\s*",
+                    nxt
+                )
+            )
+            if explicit or (discourse_hits >= 2 and not looks_new_question):
                 block_parts.append(nxt)
             else:
                 break
@@ -2699,27 +2718,146 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None):
 
     return combined, errors
 
+def _publisher_analysis_candidate(block: str):
+    """Return (analysis, method, confidence) for a publisher question block.
+
+    Minimal-scope enhancement for publisher formats such as 康軒:
+    the block can be:
+      題目 → A/B/C/D → 答案字母 → 對應教材 → 解說正文 → 【語譯】
+    without any literal "詳解：" heading.
+
+    We never fabricate content.  The candidate must already exist inside the
+    publisher source block.  If the old project truly stored only the question
+    (common in some 南一 legacy blocks), return empty instead of pretending.
+    """
+    src = _normalize_reference_text(block or "").strip()
+    if not src:
+        return "", "none", 0.0
+
+    # 1) Explicit explanation headings: strongest and safest.
+    markers = ("試題解析", "詳解", "解析", "解答說明", "解題")
+    found = []
+    for marker in markers:
+        m = re.search(
+            rf"(?:^|\n)\s*【?\s*{re.escape(marker)}\s*】?\s*[：:]?\s*",
+            src,
+            flags=re.M
+        )
+        if m:
+            found.append((m.start(), m.end(), marker))
+    if found:
+        _, content_start, marker = min(found, key=lambda x: x[0])
+        return src[content_start:].strip(), f"heading:{marker}", 1.0
+
+    # 2) Markerless publisher format. Work line-by-line and locate a plausible
+    #    transition after question/options/answer/material reference.
+    lines = [x.strip() for x in src.splitlines() if x.strip()]
+    if len(lines) < 2:
+        return "", "none", 0.0
+
+    def is_questionish(line):
+        return bool(
+            re.match(r"^[（(]?\s*[A-DＡ-Ｄ]?\s*[）)]?\s*\d{1,2}[.、．]", line)
+            or re.match(r"^[（(]\s*[A-DＡ-Ｄ]\s*[）)]", line)
+            or any(tag in line for tag in ("(A)", "(B)", "(C)", "(D)", "（A）", "（B）", "（C）", "（D）"))
+        )
+
+    def is_answer_only(line):
+        return bool(re.fullmatch(r"[A-DＡ-Ｄ]", line))
+
+    def is_material_ref(line):
+        return bool(
+            re.search(r"(版第|版第.*冊|語文天地|對應教材|課次|冊語|第.+冊)", line)
+            and len(line) <= 80
+        )
+
+    def explanation_score(line):
+        score = 0
+        # Common explanatory discourse found in publisher explanations.
+        if any(x in line for x in (
+            "故選", "故答案", "可知", "可見", "表示", "意指", "指的是",
+            "由「", "由『", "因為", "因此", "所以", "符合", "不符合",
+            "選項", "應為", "應讀", "應作", "屬於", "說明", "可判斷",
+            "文中", "題幹", "根據", "可推知"
+        )):
+            score += 2
+        if re.search(r"[，。；：]", line):
+            score += 1
+        if len(line) >= 22:
+            score += 1
+        if is_questionish(line) or is_answer_only(line) or is_material_ref(line):
+            score -= 3
+        return score
+
+    # The explanation usually starts after an answer-only line or a textbook ref.
+    candidate_starts = []
+    for i, line in enumerate(lines):
+        if is_answer_only(line) or is_material_ref(line):
+            for j in range(i + 1, min(len(lines), i + 4)):
+                if explanation_score(lines[j]) >= 2:
+                    candidate_starts.append(j)
+                    break
+
+    # If the structural cue was absent, use the first strong explanatory sentence
+    # that occurs after at least one recognizable option line.
+    if not candidate_starts:
+        seen_option = False
+        for i, line in enumerate(lines):
+            if any(tag in line for tag in ("(A)", "(B)", "(C)", "(D)", "（A）", "（B）", "（C）", "（D）")):
+                seen_option = True
+                continue
+            if seen_option and explanation_score(line) >= 3:
+                candidate_starts.append(i)
+                break
+
+    if not candidate_starts:
+        return "", "none", 0.0
+
+    start_i = min(candidate_starts)
+    tail = lines[start_i:]
+
+    # Preserve useful explanation adjuncts such as 語譯／注釋, but stop before
+    # obvious next-slide/next-question furniture if it accidentally entered block.
+    kept = []
+    for line in tail:
+        if re.match(r"^\[投影片\d+\]$", line):
+            break
+        if kept and re.match(r"^[（(]?\s*[A-DＡ-Ｄ]?\s*[）)]?\s*\d{1,2}[.、．]\s*", line):
+            break
+        kept.append(line)
+
+    analysis = "\n".join(kept).strip()
+    if not analysis:
+        return "", "none", 0.0
+
+    # Confidence rises if the candidate has explanatory cue words.
+    cue_hits = sum(
+        1 for cue in ("可知", "故選", "故答案", "因此", "所以", "表示", "意指", "應為", "符合")
+        if cue in analysis
+    )
+    confidence = 0.72 + min(0.20, cue_hits * 0.04)
+    return analysis, "heuristic-markerless", confidence
+
+
 def _publisher_analysis_only(block: str) -> str:
-    block = (block or "").strip()
-    for marker in ("試題解析：", "詳解：", "詳解 ", "解析："):
-        if marker in block:
-            tail = block.split(marker, 1)[1].strip()
-            if tail:
-                return tail
-    return block
+    analysis, _, _ = _publisher_analysis_candidate(block)
+    return analysis
+
+
 
 def _history_question_blocks(raw: str):
-    """Split historical TEACHER editions into complete per-question blocks.
+    """Split internal historical teacher editions into complete question blocks.
 
-    A complete block should contain:
-    題目＋選項＋解析＋教學重點＋教學步驟＋筆記策略（若有）。
+    Minimal-scope change:
+    - preserve existing matching by category;
+    - only make sure one history item includes the whole teacher content until
+      the next real teacher-edition question starts.
 
-    Key rule in v6.12.6:
-    Teacher-edition real question starts normally carry the answer bracket,
-    e.g. 「（C）1.」. Numbered teaching steps such as 「1. 先請學生……」
-    do NOT carry an answer bracket. Therefore we use answer-bearing starts as
-    the primary structural boundary and no longer let teaching-step numbers
-    truncate the historical excerpt.
+    Real question starts in teacher editions normally look like:
+      （C）1.
+    while teaching steps look like:
+      1. ...
+    Therefore answer-bearing question starts are the safe boundary.
     """
     raw = _normalize_reference_text(raw or "")
     if not raw:
@@ -2728,74 +2866,45 @@ def _history_question_blocks(raw: str):
     cats = [c for c in ABILITY_OPTIONS if c and c != "其他"]
     cat_alt = "|".join(re.escape(c) for c in cats)
 
-    # Historical metadata, e.g. 112會考-30.75字詞辨識
-    # means source question 3, pass rate 0.75.
     meta_re = re.compile(
-        rf"(?P<year>\d{{3}})\s*會考\s*-\s*"
-        rf"(?P<qno>\d{{1,2}})(?P<rate>0\.\d+)?\s*"
+        rf"(?P<year>\\d{{3}})\\s*會考\\s*-\\s*"
+        rf"(?P<qno>\\d{{1,2}})(?P<rate>0\\.\\d+)?\\s*"
         rf"(?P<category>{cat_alt})"
     )
     metas = list(meta_re.finditer(raw))
     if not metas:
         return []
 
-    # Primary boundary: teacher-edition question starts WITH answer brackets.
-    answer_qstart_re = re.compile(
-        r"(?m)^[ \t]*"
-        r"[（(][ \t]*(?P<ans>[A-DＡ-Ｄ])[ \t]*[）)][ \t]*"
-        r"(?P<num>\d{1,2})[\.、．][ \t]*"
+    qstart_re = re.compile(
+        r"(?m)^[ \\t]*[（(][ \\t]*(?P<ans>[A-DＡ-Ｄ])[ \\t]*[）)][ \\t]*"
+        r"(?P<num>\\d{1,2})[\\.、．][ \\t]*"
     )
-    answer_starts = list(answer_qstart_re.finditer(raw))
-
-    # Secondary fallback only for unusual historical files without answer brackets.
-    generic_qstart_re = re.compile(
-        r"(?m)^[ \t]*(?P<num>\d{1,2})[\.、．][ \t]*"
-    )
-    generic_starts = list(generic_qstart_re.finditer(raw))
+    qstarts = list(qstart_re.finditer(raw))
 
     blocks = []
     for idx, meta in enumerate(metas):
-        pos = meta.start()
         qno = int(meta.group("qno"))
+        pos = meta.start()
 
-        # Current question start: prefer nearest answer-bearing start whose
-        # displayed number matches metadata source number.
-        preceding_answer = [m for m in answer_starts if m.start() <= pos]
-        matching_answer = [m for m in preceding_answer if int(m.group("num")) == qno]
-        if matching_answer:
-            start_pos = matching_answer[-1].start()
-        elif preceding_answer:
-            start_pos = preceding_answer[-1].start()
+        preceding = [m for m in qstarts if m.start() <= pos]
+        matching = [m for m in preceding if int(m.group("num")) == qno]
+        if matching:
+            start_pos = matching[-1].start()
+        elif preceding:
+            start_pos = preceding[-1].start()
         else:
-            # Rare fallback: nearest generic start before metadata.
-            preceding_generic = [m for m in generic_starts if m.start() <= pos]
-            start_pos = preceding_generic[-1].start() if preceding_generic else max(0, pos - 500)
+            start_pos = max(0, pos - 600)
 
-        # End boundary:
-        # Prefer the first answer-bearing question start AFTER current metadata.
-        # This safely keeps all numbered teaching steps inside the current block.
-        next_answer = next((m for m in answer_starts if m.start() > pos), None)
-        if next_answer:
-            end_pos = next_answer.start()
+        next_q = next((m for m in qstarts if m.start() > pos), None)
+        if next_q:
+            end_pos = next_q.start()
         elif idx + 1 < len(metas):
-            # If answer brackets are missing, use next metadata as a safe ceiling.
-            next_meta = metas[idx + 1]
-            # Try a generic question start close before next metadata, but only
-            # within a limited window to avoid selecting an early teaching step.
-            nearby = [
-                m for m in generic_starts
-                if pos < m.start() < next_meta.start()
-                and (next_meta.start() - m.start()) <= 1400
-            ]
-            end_pos = nearby[-1].start() if nearby else next_meta.start()
+            end_pos = metas[idx + 1].start()
         else:
             end_pos = len(raw)
 
-        # Defensive guardrail for malformed extraction.
         if end_pos <= start_pos:
-            end_pos = min(len(raw), max(pos + 2500, start_pos + 1200))
-        if end_pos - start_pos > 12000:
-            end_pos = min(len(raw), start_pos + 12000)
+            end_pos = min(len(raw), max(pos + 4000, start_pos + 1500))
 
         block = raw[start_pos:end_pos].strip()
         if block:
@@ -2847,6 +2956,44 @@ def _history_examples_for_category(refdb, category: str, limit=6):
                     return out
 
     return out
+
+def _history_teacher_sections(block: str):
+    """Extract only the fields the user needs for comparison, without changing source data."""
+    src = _normalize_reference_text(block or "").strip()
+
+    labels = {
+        "analysis": ("解析", "詳解", "試題解析"),
+        "focus": ("教學重點",),
+        "teaching": ("教學步驟", "建議教學步驟"),
+        "note": ("筆記策略",),
+    }
+
+    positions = []
+    for key, names in labels.items():
+        for name in names:
+            m = re.search(
+                rf"(?:^|\\n)\\s*【?\\s*{re.escape(name)}\\s*】?\\s*[：:]?\\s*",
+                src,
+                flags=re.M
+            )
+            if m:
+                positions.append((m.start(), m.end(), key))
+                break
+
+    positions.sort(key=lambda x: x[0])
+    out = {"question": src, "analysis": "", "focus": "", "teaching": "", "note": ""}
+
+    if not positions:
+        return out
+
+    out["question"] = src[:positions[0][0]].strip()
+
+    for i, (pos, content_start, key) in enumerate(positions):
+        content_end = positions[i+1][0] if i + 1 < len(positions) else len(src)
+        out[key] = src[content_start:content_end].strip()
+
+    return out
+
 
 def _historical_category_evidence(refdb, per_category=2):
     """Build compact evidence showing how existing internal categories appeared in past teacher editions."""
@@ -5596,19 +5743,45 @@ with tab3:
 
         with right:
             st.markdown("### 一、三家出版社原始詳解")
-            st.caption("此區只做來源並列，不會自動把不同出版社文字粗糙拼接成『建議詳解』。")
+            st.caption(
+                "維持原本三家並列介面，只改善完整度：優先顯示本題完整詳解；"
+                "若需要核對題目或原始來源，可展開查看完整題塊。"
+            )
             pub_tabs = st.tabs(["翰林", "康軒", "南一"])
             for ptab, pub in zip(pub_tabs, ["翰林", "康軒", "南一"]):
                 with ptab:
                     block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
                     if block:
+                        full_analysis, detect_method, detect_confidence = _publisher_analysis_candidate(block)
+
+                        if detect_method.startswith("heading:"):
+                            st.success("🟢 已辨識完整詳解（來源有明確詳解／解析標題）")
+                        elif detect_method == "heuristic-markerless":
+                            st.info(
+                                f"🔵 已辨識無標題詳解（格式推定信心 {detect_confidence:.0%}）。"
+                                "請以來源原文核對；程式沒有新增任何出版社原文中不存在的內容。"
+                            )
+                        else:
+                            st.warning(
+                                "🟡 此舊參考庫目前只辨識到題目／選項，沒有找到可可靠判定的詳解文字。"
+                                "如果原始出版社檔確實有詳解，需要只重新匯入這一家來源檔。"
+                            )
+
                         st.text_area(
-                            f"{pub}第{q.source_no}題",
-                            value=block,
-                            height=330,
+                            f"{pub}第{q.source_no}題完整詳解",
+                            value=full_analysis or "（目前沒有可可靠辨識的詳解內容）",
+                            height=360,
                             key=f"ref_{pub}_{qno}",
                             label_visibility="collapsed"
                         )
+                        with st.expander("查看本題完整來源", expanded=False):
+                            st.text_area(
+                                f"{pub}第{q.source_no}題完整來源",
+                                value=block,
+                                height=420,
+                                key=f"ref_full_{pub}_{qno}",
+                                label_visibility="collapsed"
+                            )
                     else:
                         st.info("目前年度參考庫沒有辨識到這一題，請回「① 年度資料」檢查來源檔。")
 
@@ -5670,18 +5843,64 @@ with tab3:
                 )
                 examples = _history_examples_for_category(refdb, q.category)
                 with st.expander(f"查看歷年同題型教師版摘錄（{len(examples)} 題）", expanded=False):
-                    st.caption("只顯示與本題目前「能力類型」相同的歷年教師版題目；每則應完整包含題目、解析、教學重點、教學步驟與筆記策略（原檔有的欄位才顯示）。")
+                    st.caption(
+                        "維持原本『依能力類型找歷年題』的功能，只改善內容呈現："
+                        "把完整題塊中的解析、教學重點、教學步驟與筆記策略分開顯示，方便直接核對我們以前的寫法。"
+                    )
                     if not examples:
                         st.caption("目前年度參考包內沒有找到同能力類型的歷年題目。")
-                    for source, excerpt in examples:
+                    for idx, (source, excerpt) in enumerate(examples, 1):
+                        sections = _history_teacher_sections(excerpt)
                         st.markdown(f"**{source}**")
+
+                        with st.expander("題目", expanded=False):
+                            st.text_area(
+                                f"hist_q_{idx}_{qno}",
+                                value=sections.get("question", ""),
+                                height=180,
+                                key=f"hist_q_{idx}_{qno}",
+                                label_visibility="collapsed"
+                            )
+
+                        st.markdown("**解析**")
                         st.text_area(
-                            f"hist_{source}_{qno}",
-                            value=excerpt,
-                            height=420,
-                            key=f"hist_{source}_{qno}",
+                            f"hist_exp_{idx}_{qno}",
+                            value=sections.get("analysis") or "（來源中目前未成功擷取到解析）",
+                            height=220,
+                            key=f"hist_exp_{idx}_{qno}",
                             label_visibility="collapsed"
                         )
+
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.markdown("**教學重點**")
+                            st.text_area(
+                                f"hist_focus_{idx}_{qno}",
+                                value=sections.get("focus") or "（來源中目前未成功擷取到教學重點）",
+                                height=170,
+                                key=f"hist_focus_{idx}_{qno}",
+                                label_visibility="collapsed"
+                            )
+                        with c2:
+                            st.markdown("**教學步驟**")
+                            st.text_area(
+                                f"hist_teach_{idx}_{qno}",
+                                value=sections.get("teaching") or "（來源中目前未成功擷取到教學步驟）",
+                                height=250,
+                                key=f"hist_teach_{idx}_{qno}",
+                                label_visibility="collapsed"
+                            )
+
+                        if sections.get("note"):
+                            st.markdown("**筆記策略**")
+                            st.text_area(
+                                f"hist_note_{idx}_{qno}",
+                                value=sections.get("note", ""),
+                                height=150,
+                                key=f"hist_note_{idx}_{qno}",
+                                label_visibility="collapsed"
+                            )
+                        st.divider()
 
             with st.expander("進階／單題重做：ChatGPT 整合（平常不需要開啟）", expanded=False):
                 st.caption("只有某一題需要個別重做時才使用。一般產製請使用本頁最上方的「本次教材整批產製」流程。")
