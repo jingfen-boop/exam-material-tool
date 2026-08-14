@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.15.2 左側參考文字可複製版"
+APP_VERSION = "Web v6.15.3 文言文語譯校訂版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -53,6 +53,7 @@ class Question:
     suggested_category: str = ""
     alternative_category: str = ""
     category_reason: str = ""
+    translation: str = ""
     explanation: str = ""
     synthesis_notes: str = ""
     lexical_verification: str = ""
@@ -2674,7 +2675,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.15.2 hard rule:
+    v6.15.3 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2974,7 +2975,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.15.2: every publisher uses the SAME display/read sanitization path.
+    # v6.15.3: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2991,7 +2992,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.15.2:
+    v6.15.3:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3640,7 +3641,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.15.2 transparent recommendation evidence fields
+    # v6.15.3 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -5239,7 +5240,7 @@ with setup_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.15.2 — hard reset only the annual reference layer.
+    # v6.15.3 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5334,7 +5335,7 @@ with setup_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.15.2: UPDATE semantics, not destructive rebuild semantics.
+        # v6.15.3: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -5984,6 +5985,7 @@ with edit_tab:
             st.session_state[f"cat_{qno}"] = q.category or ""
             st.session_state[f"syn_{qno}"] = q.synthesis_notes or ""
             st.session_state[f"lex_{qno}"] = q.lexical_verification or ""
+            st.session_state[f"trans_{qno}"] = getattr(q, "translation", "") or ""
             st.session_state[f"exp_{qno}"] = q.explanation or ""
             st.session_state[f"focus_{qno}"] = q.teaching_focus or ""
             st.session_state[f"teach_{qno}"] = q.teaching or ""
@@ -5995,6 +5997,7 @@ with edit_tab:
         for _key, _value in {
             f"syn_{qno}": q.synthesis_notes,
             f"lex_{qno}": q.lexical_verification,
+            f"trans_{qno}": getattr(q, "translation", ""),
             f"exp_{qno}": q.explanation,
             f"focus_{qno}": q.teaching_focus,
             f"teach_{qno}": q.teaching,
@@ -6232,7 +6235,7 @@ with edit_tab:
             st.markdown("## 右側｜內容編輯")
             st.caption("所有正式內容集中在分頁內；切換分頁不影響左側參考資料。")
 
-            edit_tabs = st.tabs(["題目／版型", "能力／分析", "詳解", "教學", "筆記"])
+            edit_tabs = st.tabs(["題目／版型", "能力／分析", "語譯／詳解", "教學", "筆記"])
 
             with edit_tabs[0]:
                 st.markdown("### 題目內容／結構")
@@ -6280,6 +6283,13 @@ with edit_tab:
                     key=f"syn_{qno}"
                 )
 
+                st.markdown("### 文言文語譯原則")
+                st.caption(
+                    "文言文題：先比對三家出版社語譯，整理共同語意與差異；"
+                    "遇到關鍵實詞、虛詞或特殊義項，再以教育部國語辭典查證，"
+                    "正式語譯以辭典義項與本文語境相符者為準。"
+                )
+
                 st.markdown("### 字詞查證紀錄")
                 st.caption(
                     "牽涉字詞義時依序查證：①教育部《國語辭典簡編本》→"
@@ -6305,6 +6315,19 @@ with edit_tab:
                         )
 
             with edit_tabs[2]:
+                st.markdown("### 文言文語譯（文言題使用）")
+                st.caption(
+                    "若本題含文言文，先整理語譯再校訂詳解。"
+                    "語譯可比對左側翰林／康軒／南一版本；涉及特定字詞義時，"
+                    "仍以教育部國語辭典查證結果為準。非文言題可留白。"
+                )
+                q.translation = st.text_area(
+                    "建議語譯",
+                    height=260,
+                    key=f"trans_{qno}",
+                    placeholder="文言文題請在此整理完整語譯；非文言題可留白。"
+                )
+
                 st.markdown("### 建議詳解")
                 _basis_parts = []
                 if getattr(q, "category_reason", ""):
@@ -6313,6 +6336,8 @@ with edit_tab:
                     _basis_parts.append("【三家比較／綜合筆記】\n" + q.synthesis_notes)
                 if getattr(q, "lexical_verification", ""):
                     _basis_parts.append("【字詞查證紀錄】\n" + q.lexical_verification)
+                if getattr(q, "translation", ""):
+                    _basis_parts.append("【目前語譯草稿】\n" + q.translation)
 
                 with st.expander("📌 查看 ChatGPT 撰寫依據", expanded=False):
                     st.text_area(
