@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.2 精簡校對工作台版"
+APP_VERSION = "Web v6.16.3 觸類旁通筆記強化版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2676,7 +2676,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.16.2 hard rule:
+    v6.16.3 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2976,7 +2976,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.16.2: every publisher uses the SAME display/read sanitization path.
+    # v6.16.3: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2993,7 +2993,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.16.2:
+    v6.16.3:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3311,7 +3311,7 @@ def _history_match_score(q, block: str, category: str = ""):
 def _history_examples_for_category(refdb, category: str, limit=6, q=None):
     """Return historical teacher examples ranked by knowledge point, then category.
 
-    v6.16.2: if q is supplied, concrete language-knowledge topic outranks the
+    v6.16.3: if q is supplied, concrete language-knowledge topic outranks the
     broad ability category. Low-relevance records are not promoted as primary
     references.
     """
@@ -3717,7 +3717,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.16.2 transparent recommendation evidence fields
+    # v6.16.3 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4213,6 +4213,18 @@ def _build_chatgpt_analysis_package(refdb, q):
 5. 字詞查證的來源與查證過程主要放在「字詞查證紀錄」；「建議詳解」維持本團隊教材語氣，除非辨義本身需要，否則不在正文反覆寫出辭典全名。
 6. 完稿前自行做一次「出版社相似度檢查」：若整段明顯像翰林、康軒或南一其中一家，必須改寫為本團隊歷年常見的簡潔、逐項判讀式寫法，再輸出。
 7. 【筆記策略的核心定位】筆記策略不是幫學生解「當下這一題」，而是把本題可延伸保留的「重要字、詞、成語、字義辨析、文言語詞、標點、修辭、六書、語文規則等可跨題複習的語文知識」整理成可記憶的筆記。不得把「選項判斷、文本證據、是否符合本題、共同點、答案排除流程」直接做成筆記表格。
+   - 【觸類旁通固定規則】若本題考查一個可與同類知識比較的語文知識點，不可只整理本題答案；應主動補齊最有助於辨析與遷移的同類核心知識。
+   - 例如六書題若考「象形」，筆記應主動比較常用的「象形、指事、會意、形聲」，而非只列象形。
+   - 這類比較表原則上使用「知識名稱｜白話說明｜示例文字」三欄；必要時可依題型調整欄名，但必須保留白話說明與例子。
+   - 白話說明必須依可靠來源整理：國中小教學優先採教育部《國語辭典簡編本》；若簡編本不足，再參考《重編國語辭典修訂本》、出版社或歷年教師版。不可只憑一般常識自行補寫。
+   - 示例文字也必須有可靠來源或可由來源直接支持；不要為了湊例子而猜測。
+   - 延伸範圍以「對學生辨析同類概念真正有幫助」為限，不追求越多越好。
+   - 六書基礎比較的學生版白話原則：
+     ① 象形：按照具體事物的外形，把它的樣子描畫成文字。示例可用日、月、山、水；若本題字本身有來源支持，也應列入。
+     ② 指事：有些意思沒有具體形狀可畫，就用象徵性的符號表示意思。示例可用上、下。
+     ③ 會意：把兩個以上的字組合起來，利用它們的意思合成一個新的意思。示例可用休、武、信。
+     ④ 形聲：把表示意思的部分和表示讀音的部分組合起來造字。示例可用江、河。
+   - 上述六書白話原則依教育部國語辭典資料整理；產製時仍須結合本題來源內容，不可機械套用。
    - 若本題有值得累積的語文知識：提供簡潔表格，優先採「詞語／解釋」兩欄；只有語文知識本身確實需要時才增加其他欄位。
    - 字詞辨識題：第一欄必須把要辨識的字框出，例如「立『即』」「若『即』若離」，第二欄表頭只寫「解釋」。
    - 不得增加「是否符合題意」「判斷」「本題證據」「選項」等只為解當題服務的欄位。
@@ -4345,6 +4357,7 @@ def _build_batch_chatgpt_package(refdb, questions):
                 "教學重點": "完整內容",
                 "建議教學步驟": "完整內容",
                 "筆記策略": "若有可跨題複習的語文知識則說明整理重點；否則寫「本題不另設語文筆記」",
+                "筆記策略表格規則": "適合觸類旁通時，主動補齊同類核心知識；優先採知識名稱／白話說明／示例文字三欄。",
                 "筆記策略表格": {
                     "title": "學生課堂即時筆記如下：",
                     "columns": ["詞語", "解釋"],
@@ -4756,7 +4769,7 @@ def _sync_live_editor_state_to_questions():
     contains the user's newest edits, but Question objects may still contain the
     previous values. Without this sync, the ZIP can be one edit behind.
 
-    v6.16.2 syncs only known formal editor fields. Reference/source widgets are
+    v6.16.3 syncs only known formal editor fields. Reference/source widgets are
     intentionally excluded because they are copy-only and must never overwrite
     reference_db.
     """
@@ -5329,7 +5342,7 @@ with pc2:
         )
         st.caption(
             "最簡單的管理方式：每份題本固定一個專案名稱、固定一個 ZIP。"
-            "v6.16.2 下載前會先同步目前畫面最新人工修改，避免專案備份落後一版。"
+            "v6.16.3 下載前會先同步目前畫面最新人工修改，避免專案備份落後一版。"
         )
     else:
         st.info("建立題庫後即可儲存完整年度專案。")
@@ -5433,7 +5446,7 @@ with setup_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.16.2 — hard reset only the annual reference layer.
+    # v6.16.3 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5528,7 +5541,7 @@ with setup_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.16.2: UPDATE semantics, not destructive rebuild semantics.
+        # v6.16.3: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6591,6 +6604,11 @@ with edit_tab:
 
             with edit_tabs[4]:
                 st.markdown("### 筆記策略")
+                st.caption(
+                    "觸類旁通原則：適合比較的語文知識，不只整理本題答案；"
+                    "新版分析會主動補齊同類核心概念，並以「白話說明＋示例文字」呈現。"
+                    "已人工修改的專案內容不會因版本升級自動覆蓋。"
+                )
                 q.note_strategy = st.text_area(
                     "筆記策略（選填）",
                     height=180,
