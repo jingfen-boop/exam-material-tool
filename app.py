@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.11 解析來源硬性優先＋診斷分出版社修正版"
+APP_VERSION = "Web v6.13.12 出版社解析跨題污染切斷修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2674,7 +2674,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.13.11 hard rule:
+    v6.13.12 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2745,7 +2745,7 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None, debug
                     parsed = {}
 
             for q, block in parsed.items():
-                block = (block or "").strip()
+                block = _trim_publisher_cross_question_tail((block or "").strip(), q)
                 if block:
                     candidates.setdefault(str(q), []).append(
                         _candidate_record(block, uploaded.name)
@@ -2763,7 +2763,7 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None, debug
                 break
             recovered = _recover_missing_question_blocks(raw, missing, expected_count)
             for q, block in recovered.items():
-                block = (block or "").strip()
+                block = _trim_publisher_cross_question_tail((block or "").strip(), q)
                 if block:
                     candidates.setdefault(str(q), []).append(
                         _candidate_record(block, source_name)
@@ -2774,7 +2774,7 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None, debug
         if missing and question_bank:
             recovered = _recover_by_question_bank(raw_sources, missing, question_bank)
             for q, block in recovered.items():
-                block = (block or "").strip()
+                block = _trim_publisher_cross_question_tail((block or "").strip(), q)
                 if block:
                     candidates.setdefault(str(q), []).append(
                         _candidate_record(block, "內容比對復原")
@@ -2799,6 +2799,7 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None, debug
 
         ranked = sorted(unique, key=lambda r: r["score"], reverse=True)
         winner = ranked[0]
+        winner["block"] = _trim_publisher_cross_question_tail(winner["block"], q)
         combined[str(q)] = winner["block"]
 
         merge_debug[str(q)] = {
@@ -2979,6 +2980,38 @@ def _publisher_best_analysis(refdb, pub, qno):
     if orphan and len(_norm_cmp_text(orphan))>len(_norm_cmp_text(direct))+30:
         return orphan,"legacy-orphan-recovered",0.90,block
     return direct,method,confidence,block
+
+def _trim_publisher_cross_question_tail(block, current_q=None):
+    """Cut a mistakenly appended following publisher question at a strong boundary."""
+    s=(block or "").strip()
+    if not s:
+        return s
+
+    # Strongest boundary: a new PPT slide marker after current content.
+    # In publisher PPTX, each slide is a separate source unit; if another marker
+    # appears inside a question block it belongs to a later question/slide.
+    markers=list(re.finditer(r'\n\s*\[投影片\s*\d+\]\s*', s))
+    if markers:
+        m=markers[0]
+        if m.start()>20:
+            return s[:m.start()].rstrip()
+
+    # Second boundary: explicit next question number, only when current q is known.
+    if current_q is not None:
+        try:
+            nq=int(current_q)+1
+            patterns=[
+                rf'\n\s*[（(]?\s*[A-DＡ-Ｄ]?\s*[）)]?\s*{nq}\s*[\.、．]\s*',
+                rf'\n\s*第\s*{nq}\s*題\s*',
+            ]
+            for p in patterns:
+                m=re.search(p,s)
+                if m and m.start()>20:
+                    return s[:m.start()].rstrip()
+        except Exception:
+            pass
+    return s
+
 
 def _publisher_analysis_candidate(block: str):
     """Return (analysis, method, confidence) for a publisher question block.
@@ -3569,7 +3602,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.11 transparent recommendation evidence fields
+    # v6.13.12 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -5073,7 +5106,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.13.11 — hard reset only the annual reference layer.
+    # v6.13.12 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5168,7 +5201,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.13.11: UPDATE semantics, not destructive rebuild semantics.
+        # v6.13.12: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6304,7 +6337,7 @@ with tab3:
                                     "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
                                 )
 
-                        # v6.13.11: reference source is display-only. Include a
+                        # v6.13.12: reference source is display-only. Include a
                         # content signature in widget keys so Streamlit can never
                         # reuse a stale blank value after the reference DB changes.
                         _ref_sig = hashlib.md5(
