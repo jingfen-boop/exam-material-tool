@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.9 參考庫寫入與顯示同步修正版"
+APP_VERSION = "Web v6.13.10 同出版社多來源逐題擇優合併修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2672,14 +2672,51 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 
 
 def _parse_publisher_files(files, expected_count=None, question_bank=None):
-    """Parse and merge publisher files.
+    """Parse publisher files and choose the best source block PER QUESTION.
 
-    v4.0 uses three layers:
-    1. normal question-number parsing;
-    2. irregular-number recovery;
-    3. official-question-bank CONTENT matching for omitted/duplicated numbers.
+    v6.13.10 fixes the verified failure mode where the same publisher has
+    multiple source files (e.g. 南一解析 PPTX + 南一教用卷 DOCX):
+    a weaker question block must never overwrite or dilute a block that has
+    a reliable headed explanation.
+
+    Selection priority:
+    1. block with headed 解析／詳解 and highest extraction confidence;
+    2. longer extracted explanation;
+    3. dedicated explanation PPTX;
+    4. richer complete block.
+
+    The winning block is stored as the official per-question reference block.
+    Other files are still used for missing-question recovery, but they do not
+    get concatenated into a good explanation block.
     """
-    combined, errors, raw_sources = {}, [], []
+    errors, raw_sources = [], []
+    candidates = {}
+
+    def _candidate_quality(block, uploaded_name):
+        block = (block or "").strip()
+        if not block:
+            return (-1, -1, -1, -1, -1)
+
+        analysis, method, confidence = _publisher_analysis_candidate(block)
+        analysis_len = len((analysis or "").strip())
+        headed = 1 if str(method).startswith("heading:") else 0
+        has_analysis_word = 1 if re.search(r"(?:^|\n)\s*(?:解析|詳解)\s*[:：]?", block) else 0
+
+        ext = Path(uploaded_name).suffix.lower()
+        dedicated_pptx = 1 if (
+            ext == ".pptx"
+            and ("解析" in block or "詳解" in block)
+            and ("答案" in block or analysis_len > 0)
+        ) else 0
+
+        # Lexicographic tuple: explanation reliability dominates raw length.
+        return (
+            headed,
+            has_analysis_word,
+            int(round(float(confidence or 0) * 1000)),
+            analysis_len,
+            dedicated_pptx * 100000 + len(block),
+        )
 
     for uploaded in files or []:
         try:
@@ -2689,61 +2726,77 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None):
             if "[投影片" in raw:
                 parsed = _split_slides_by_question(raw, expected_count)
             else:
-                # Some older code paths may not have a reliable Word-number splitter.
-                # Number-anchor recovery below plus content matching is intentionally
-                # sufficient to complement the PPT/other files.
                 try:
                     parsed = _split_text_by_question(raw, expected_count)
                 except Exception:
                     parsed = {}
 
-            # v6.13.9: dedicated publisher explanation PPTX gets priority.
-            # Reason: some teacher-edition DOCX files are visually laid out in columns,
-            # so their extracted paragraph order can separate a question from its explanation.
-            # A publisher "解析" PPTX is usually one-question-per-slide and explicitly contains
-            # 答案／解析／題幹語譯.  Put that block FIRST so downstream explanation extraction
-            # sees the authoritative explanation before any DOCX layout fragments.
-            ext = Path(uploaded.name).suffix.lower()
-            raw_has_explanations = ("解析" in raw and "答案" in raw)
-            prefer_as_explanation_source = (ext == ".pptx" and raw_has_explanations)
-
             for q, block in parsed.items():
                 block = (block or "").strip()
-                if not block:
-                    continue
-
-                if q not in combined:
-                    combined[q] = block
-                elif block not in combined[q]:
-                    if prefer_as_explanation_source:
-                        combined[q] = block + "\n\n" + combined[q]
-                    else:
-                        combined[q] += "\n\n" + block
-
+                if block:
+                    candidates.setdefault(str(q), []).append((uploaded.name, block))
         except Exception as e:
             errors.append(f"{uploaded.name}：{e}")
 
-    # Layer 2: generic question-number-anchor recovery.
+    # Missing-number recovery remains available, but recovered blocks are only
+    # additional candidates. They can win only if they are genuinely better.
     if expected_count:
-        missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
-        for _, raw in raw_sources:
+        present = set(candidates.keys())
+        missing = [q for q in range(1, expected_count + 1) if str(q) not in present]
+
+        for source_name, raw in raw_sources:
             if not missing:
                 break
             recovered = _recover_missing_question_blocks(raw, missing, expected_count)
             for q, block in recovered.items():
-                combined.setdefault(q, block.strip())
-            missing = [q for q in range(1, expected_count + 1) if str(q) not in combined]
+                if (block or "").strip():
+                    candidates.setdefault(str(q), []).append((source_name, block.strip()))
+            present = set(candidates.keys())
+            missing = [q for q in range(1, expected_count + 1) if str(q) not in present]
 
-        # Layer 3: match the actual official question content.
         if missing and question_bank:
-            recovered = _recover_by_question_bank(
-                raw_sources,
-                missing,
-                question_bank
-            )
+            recovered = _recover_by_question_bank(raw_sources, missing, question_bank)
             for q, block in recovered.items():
-                combined.setdefault(q, block.strip())
+                if (block or "").strip():
+                    candidates.setdefault(str(q), []).append(("內容比對復原", block.strip()))
 
+    combined = {}
+    merge_debug = {}
+
+    for q, items in candidates.items():
+        # Remove exact duplicate blocks first.
+        unique = []
+        seen = set()
+        for source_name, block in items:
+            sig = _norm_cmp_text(block)
+            if not sig or sig in seen:
+                continue
+            seen.add(sig)
+            unique.append((source_name, block))
+
+        ranked = sorted(
+            unique,
+            key=lambda item: _candidate_quality(item[1], item[0]),
+            reverse=True
+        )
+        if not ranked:
+            continue
+
+        winner_name, winner_block = ranked[0]
+        combined[str(q)] = winner_block
+
+        winner_analysis, winner_method, winner_conf = _publisher_analysis_candidate(winner_block)
+        merge_debug[str(q)] = {
+            "winner": winner_name,
+            "candidate_count": len(ranked),
+            "method": winner_method,
+            "confidence": float(winner_conf or 0),
+            "analysis_chars": len((winner_analysis or "").strip()),
+            "block_chars": len(winner_block),
+        }
+
+    # Expose diagnostics without changing the persisted reference_db schema.
+    st.session_state["_publisher_merge_debug_last"] = merge_debug
     return combined, errors
 
 def _norm_cmp_text(s):
@@ -3485,7 +3538,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.9 transparent recommendation evidence fields
+    # v6.13.10 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4989,7 +5042,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.13.9 — hard reset only the annual reference layer.
+    # v6.13.10 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5084,7 +5137,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.13.9: UPDATE semantics, not destructive rebuild semantics.
+        # v6.13.10: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -5157,10 +5210,12 @@ with ref_tab:
             qdict = newdb.get("publisher", {}).get(pub, {}) or {}
             q4_block = qdict.get("4", "")
             q4_analysis = _publisher_analysis_only(q4_block) if q4_block else ""
+            _merge_q4 = (st.session_state.get("_publisher_merge_debug_last", {}) or {}).get("4", {})
             check[pub] = {
                 "題數": len(qdict),
                 "第4題區塊字數": len(q4_block),
                 "第4題詳解字數": len(q4_analysis),
+                "第4題本次擇優來源": _merge_q4.get("winner", "—") if q4_block else "—",
             }
         st.session_state["_last_reference_write_check"] = check
 
@@ -6193,7 +6248,7 @@ with tab3:
                                     "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
                                 )
 
-                        # v6.13.9: reference source is display-only. Include a
+                        # v6.13.10: reference source is display-only. Include a
                         # content signature in widget keys so Streamlit can never
                         # reuse a stale blank value after the reference DB changes.
                         _ref_sig = hashlib.md5(
