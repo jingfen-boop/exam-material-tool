@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.2 出版社無標題詳解辨識加強版"
+APP_VERSION = "Web v6.13.3 舊參考庫重組修正版"
 
 # -----------------------------
 # Models
@@ -2718,6 +2718,107 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None):
 
     return combined, errors
 
+def _norm_cmp_text(s):
+    return re.sub(r"\s+", "", _normalize_reference_text(s or ""))
+
+def _dedupe_consecutive_chunks(chunks):
+    out=[]; prev=""
+    for ch in chunks:
+        sig=_norm_cmp_text(ch)[:220]
+        if sig and sig==prev:
+            continue
+        out.append(ch); prev=sig
+    return out
+
+def _legacy_history_reconstructed_records(raw: str):
+    """Repair old history_raw shaped as ALL QUESTIONS -> ALL TEACHER BOXES."""
+    raw=_normalize_reference_text(raw or "")
+    if not raw:
+        return []
+
+    cats=[c for c in ABILITY_OPTIONS if c and c!="其他"]
+    cat_alt="|".join(re.escape(c) for c in cats)
+    meta_re=re.compile(
+        rf"(?P<year>\d{{3}})\s*會考\s*-\s*"
+        rf"(?P<qno>\d{{1,2}})(?P<rate>0\.\d+)?\s*"
+        rf"(?P<category>{cat_alt})"
+    )
+    metas=list(meta_re.finditer(raw))
+    if not metas:
+        return []
+
+    first_analysis=re.search(r"(?m)^\s*(?:【\s*)?解析(?:\s*】)?\s*[：:]\s*", raw)
+    if not first_analysis:
+        return []
+    question_end=first_analysis.start()
+
+    q_records=[]
+    question_metas=[m for m in metas if m.start()<question_end]
+    for i,meta in enumerate(question_metas):
+        start=meta.start()
+        before_start=max(0,start-1200)
+        before=raw[before_start:start]
+        qstarts=list(re.finditer(
+            r"(?m)^[ \t]*[（(][ \t]*[A-DＡ-Ｄ][ \t]*[）)][ \t]*"
+            r"\d{1,2}[.、．][ \t]*", before
+        ))
+        if qstarts:
+            start=before_start+qstarts[-1].start()
+        end=question_metas[i+1].start() if i+1<len(question_metas) else question_end
+        q_records.append({
+            "year":meta.group("year"),
+            "qno":meta.group("qno"),
+            "category":meta.group("category"),
+            "question":raw[start:end].strip(),
+        })
+
+    teacher_tail=raw[first_analysis.start():]
+    starts=list(re.finditer(r"(?m)^\s*(?:【\s*)?解析(?:\s*】)?\s*[：:]\s*", teacher_tail))
+    chunks=[]
+    for i,m in enumerate(starts):
+        end=starts[i+1].start() if i+1<len(starts) else len(teacher_tail)
+        chunks.append(teacher_tail[m.start():end].strip())
+    chunks=_dedupe_consecutive_chunks(chunks)
+
+    records=[]
+    for i,qrec in enumerate(q_records):
+        teacher=chunks[i] if i<len(chunks) else ""
+        records.append({**qrec, "text":(qrec["question"]+"\n"+teacher).strip(), "teacher_chunk":teacher})
+    return records
+
+def _publisher_orphan_explanation_index(refdb, pub):
+    """Find numbered explanations misplaced inside another legacy publisher block."""
+    blocks=(refdb.get("publisher",{}) or {}).get(pub,{}) or {}
+    corpus=_normalize_reference_text("\n".join(str(v or "") for v in blocks.values()))
+    if not corpus:
+        return {}
+    start_re=re.compile(
+        r"(?m)^\s*(?P<qno>\d{1,2})[.．、]\s*"
+        r"(?=(?:由|根據|文中|題幹|此題|本題|[（(]?[A-DＡ-Ｄ][）)]?|「|『))"
+    )
+    starts=list(start_re.finditer(corpus))
+    out={}
+    for i,m in enumerate(starts):
+        end=starts[i+1].start() if i+1<len(starts) else len(corpus)
+        chunk=corpus[m.end():end].strip()
+        if len(chunk)<20:
+            continue
+        cues=sum(1 for x in ("可知","故選","故答案","因此","所以","表示","意指","應為","符合","不符合","未提及","由「","由『") if x in chunk)
+        if cues<1:
+            continue
+        qno=m.group("qno")
+        if len(chunk)>len(out.get(qno,"")):
+            out[qno]=chunk
+    return out
+
+def _publisher_best_analysis(refdb, pub, qno):
+    block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
+    direct,method,confidence=_publisher_analysis_candidate(block)
+    orphan=_publisher_orphan_explanation_index(refdb,pub).get(str(qno),"")
+    if orphan and len(_norm_cmp_text(orphan))>len(_norm_cmp_text(direct))+30:
+        return orphan,"legacy-orphan-recovered",0.90,block
+    return direct,method,confidence,block
+
 def _publisher_analysis_candidate(block: str):
     """Return (analysis, method, confidence) for a publisher question block.
 
@@ -2917,44 +3018,42 @@ def _history_question_blocks(raw: str):
     return blocks
 
 def _history_examples_for_category(refdb, category: str, limit=6):
-    """Return ONLY historical question blocks matching the selected ability type."""
+    """Return historical teacher examples; repair old all-questions-first references."""
     if not category:
         return []
-
-    aliases = {category}
-    if category == "表層文意理解":
+    aliases={category}
+    if category=="表層文意理解":
         aliases.add("表層文意")
-
-    out = []
-    for source, raw in (refdb.get("history_raw", {}) or {}).items():
-        blocks = _history_question_blocks(raw)
-
-        if blocks:
-            for b in blocks:
-                bcat = b.get("category", "")
-                if not any(a == bcat or a in bcat for a in aliases):
+    out=[]
+    for source,raw in (refdb.get("history_raw",{}) or {}).items():
+        repaired=_legacy_history_reconstructed_records(raw)
+        if repaired:
+            for b in repaired:
+                bcat=b.get("category","")
+                if not any(a==bcat or a in bcat for a in aliases):
                     continue
-                label = f"{source}｜歷年原第{b.get('qno','?')}題｜{bcat}"
-                out.append((label, b["text"]))
-                if len(out) >= limit:
-                    return out
+                out.append((f"{source}｜歷年原第{b.get('qno','?')}題｜{bcat}｜舊檔重組", b["text"]))
+                if len(out)>=limit: return out
             continue
 
-        # Backward-compatible fallback for old reference packages whose text
-        # cannot be structurally split. Still show only a compact category
-        # neighborhood rather than most of the source document.
-        positions = []
-        for key in aliases:
-            positions.extend(m.start() for m in re.finditer(re.escape(key), raw))
-        for pos in sorted(set(positions)):
-            start = max(0, pos - 280)
-            end = min(len(raw), pos + 1800)
-            excerpt = raw[start:end].strip()
-            if excerpt:
-                out.append((source + "｜同能力類型摘錄", excerpt))
-                if len(out) >= limit:
-                    return out
+        blocks=_history_question_blocks(raw)
+        if blocks:
+            for b in blocks:
+                bcat=b.get("category","")
+                if not any(a==bcat or a in bcat for a in aliases):
+                    continue
+                out.append((f"{source}｜歷年原第{b.get('qno','?')}題｜{bcat}", b["text"]))
+                if len(out)>=limit: return out
+            continue
 
+        positions=[]
+        for key in aliases:
+            positions.extend(m.start() for m in re.finditer(re.escape(key),raw))
+        for pos in sorted(set(positions)):
+            excerpt=raw[max(0,pos-280):min(len(raw),pos+1800)].strip()
+            if excerpt:
+                out.append((source+"｜同能力類型摘錄",excerpt))
+                if len(out)>=limit: return out
     return out
 
 def _history_teacher_sections(block: str):
@@ -3512,11 +3611,14 @@ def _clean_ref_text(s, limit=1800):
     return s[:limit]
 
 def _publisher_blocks_for_question(refdb, qno):
-    out = {}
-    for pub in ("翰林", "康軒", "南一"):
-        block = refdb.get("publisher", {}).get(pub, {}).get(str(qno), "")
-        if block:
-            out[pub] = _clean_ref_text(block)
+    """Use the best publisher explanation already present anywhere in the legacy DB."""
+    out={}
+    for pub in ("翰林","康軒","南一"):
+        analysis,method,confidence,block=_publisher_best_analysis(refdb,pub,qno)
+        if analysis:
+            out[pub]=analysis
+        elif block:
+            out[pub]=block
     return out
 
 def _build_source_grounded_draft(refdb, q):
@@ -5752,7 +5854,9 @@ with tab3:
                 with ptab:
                     block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
                     if block:
-                        full_analysis, detect_method, detect_confidence = _publisher_analysis_candidate(block)
+                        full_analysis, detect_method, detect_confidence, direct_block = _publisher_best_analysis(
+                            refdb, pub, q.source_no
+                        )
 
                         if detect_method.startswith("heading:"):
                             st.success("🟢 已辨識完整詳解（來源有明確詳解／解析標題）")
@@ -5761,10 +5865,15 @@ with tab3:
                                 f"🔵 已辨識無標題詳解（格式推定信心 {detect_confidence:.0%}）。"
                                 "請以來源原文核對；程式沒有新增任何出版社原文中不存在的內容。"
                             )
+                        elif detect_method == "legacy-orphan-recovered":
+                            st.info(
+                                "🔷 已從舊參考庫其他區塊找回本題詳解。"
+                                "表示舊版把詳解存到錯誤題號區塊；新版只重新配對既有原文。"
+                            )
                         else:
                             st.warning(
-                                "🟡 此舊參考庫目前只辨識到題目／選項，沒有找到可可靠判定的詳解文字。"
-                                "如果原始出版社檔確實有詳解，需要只重新匯入這一家來源檔。"
+                                "🟡 此舊參考庫目前確實沒有找到本題可可靠配對的詳解文字。"
+                                "若原始出版社檔有詳解，只需要重新匯入這一家來源檔。"
                             )
 
                         st.text_area(
