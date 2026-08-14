@@ -22,7 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.7 建議稿撰寫依據透明化版"
+APP_VERSION = "Web v6.13.8 建議稿撰寫依據透明化版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2696,7 +2696,7 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None):
                 except Exception:
                     parsed = {}
 
-            # v6.13.7: dedicated publisher explanation PPTX gets priority.
+            # v6.13.8: dedicated publisher explanation PPTX gets priority.
             # Reason: some teacher-edition DOCX files are visually laid out in columns,
             # so their extracted paragraph order can separate a question from its explanation.
             # A publisher "解析" PPTX is usually one-question-per-slide and explicitly contains
@@ -3484,7 +3484,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.7 transparent recommendation evidence fields
+    # v6.13.8 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4988,37 +4988,94 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
+    # v6.13.8 — hard reset only the annual reference layer.
+    # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
+    if "_annual_ref_upload_generation" not in st.session_state:
+        st.session_state["_annual_ref_upload_generation"] = 0
+
+    with st.expander("🧪 參考庫徹底重傳／測試", expanded=False):
+        st.caption(
+            "只清除三家出版社、歷年教師版參考庫，以及專案內保存的年度參考原始檔。"
+            "不會刪除題庫、考題總覽人工修改、選題結果、圖片或 ChatGPT 分析。"
+        )
+        if st.button("🧹 清空參考庫並重新選檔", key="hard_reset_annual_refs", use_container_width=True):
+            st.session_state.reference_db = _empty_reference_db(int(st.session_state.year))
+            sources = dict(st.session_state.get("project_sources", {}) or {})
+            for k in list(sources.keys()):
+                if k.startswith(("hanlin_", "kangxuan_", "nanyi_", "history_")):
+                    sources.pop(k, None)
+            st.session_state.project_sources = sources
+            st.session_state["_annual_ref_upload_generation"] += 1
+            st.success("已清空年度參考層。題庫、人工編輯與選題均保留。請重新上傳出版社與歷年教師版原始檔。")
+            st.rerun()
+
+    _ref_gen = int(st.session_state.get("_annual_ref_upload_generation", 0))
+
     pc1, pc2, pc3 = st.columns(3)
     with pc1:
         hanlin_files = st.file_uploader(
             "翰林詳解",
             type=["docx", "pptx", "pdf", "txt", "doc"],
             accept_multiple_files=True,
-            key="annual_hanlin"
+            key=f"annual_hanlin_{_ref_gen}"
         )
     with pc2:
         kang_files = st.file_uploader(
             "康軒詳解",
             type=["docx", "pptx", "pdf", "txt", "doc"],
             accept_multiple_files=True,
-            key="annual_kang"
+            key=f"annual_kang_{_ref_gen}"
         )
     with pc3:
         nanyi_files = st.file_uploader(
             "南一詳解",
             type=["docx", "pptx", "pdf", "txt", "doc"],
             accept_multiple_files=True,
-            key="annual_nanyi"
+            key=f"annual_nanyi_{_ref_gen}"
         )
 
     history_files = st.file_uploader(
         "本團隊歷年教師版參考檔（可一次上傳多份）",
         type=["docx", "pptx", "pdf", "txt", "doc"],
         accept_multiple_files=True,
-        key="annual_history"
+        key=f"annual_history_{_ref_gen}"
     )
 
     expected_for_refs = len(st.session_state.questions) if st.session_state.questions else None
+
+    with st.expander("🔬 先測試本次上傳檔案是否真的讀到解析", expanded=False):
+        test_pub = st.selectbox("測試出版社", ["南一", "翰林", "康軒"], key=f"ref_test_pub_{_ref_gen}")
+        test_map = {"南一": nanyi_files, "翰林": hanlin_files, "康軒": kang_files}
+        test_files = test_map[test_pub] or []
+        if not test_files:
+            st.info("請先在上方選擇這家出版社的原始檔。")
+        else:
+            for uf in test_files:
+                try:
+                    raw_test = _uploaded_file_text(uf)
+                    st.write(f"**{uf.name}**：讀到 {len(raw_test):,} 字；「解析」{raw_test.count('解析')} 次；「答案」{raw_test.count('答案')} 次。")
+                except Exception as e:
+                    st.error(f"{uf.name} 無法讀取：{e}")
+
+            if st.button("執行逐題解析測試", key=f"run_ref_parse_test_{_ref_gen}"):
+                parsed_test, test_errs = _parse_publisher_files(
+                    test_files, expected_for_refs, st.session_state.questions
+                )
+                st.write(f"辨識到 **{len(parsed_test)} 題**。")
+                if test_errs:
+                    st.warning("\n".join(test_errs))
+                q_test = st.number_input(
+                    "檢查原題號", min_value=1,
+                    max_value=max(1, expected_for_refs or 99),
+                    value=min(4, max(1, expected_for_refs or 99)),
+                    step=1,
+                    key=f"ref_test_qno_{_ref_gen}"
+                )
+                block_test = parsed_test.get(str(int(q_test)), "")
+                ana_test, method_test, conf_test = _publisher_analysis_candidate(block_test)
+                st.caption(f"擷取方法：{method_test}｜信心值：{conf_test:.0%}")
+                st.text_area("該題解析器收到的完整區塊", block_test or "（沒有對應區塊）", height=260)
+                st.text_area("實際判定為詳解的內容", ana_test or "（沒有辨識到詳解）", height=220)
 
     if st.button(
         "建立／更新本年度參考庫",
