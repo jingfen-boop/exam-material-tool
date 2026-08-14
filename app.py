@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.10 同出版社多來源逐題擇優合併修正版"
+APP_VERSION = "Web v6.13.11 解析來源硬性優先＋診斷分出版社修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2671,52 +2671,65 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
     return recovered
 
 
-def _parse_publisher_files(files, expected_count=None, question_bank=None):
-    """Parse publisher files and choose the best source block PER QUESTION.
+def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
+    """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.13.10 fixes the verified failure mode where the same publisher has
-    multiple source files (e.g. 南一解析 PPTX + 南一教用卷 DOCX):
-    a weaker question block must never overwrite or dilute a block that has
-    a reliable headed explanation.
+    v6.13.11 hard rule:
+    A candidate that actually yields explanation text MUST ALWAYS beat a candidate
+    that yields zero explanation text, regardless of DOCX/PPTX length.
 
-    Selection priority:
-    1. block with headed 解析／詳解 and highest extraction confidence;
-    2. longer extracted explanation;
-    3. dedicated explanation PPTX;
-    4. richer complete block.
+    Within explanation-bearing candidates:
+      1. explicit heading 解析／詳解／試題解析 wins;
+      2. higher confidence wins;
+      3. longer extracted explanation wins;
+      4. dedicated explanation PPTX wins ties;
+      5. richer block wins final tie.
 
-    The winning block is stored as the official per-question reference block.
-    Other files are still used for missing-question recovery, but they do not
-    get concatenated into a good explanation block.
+    This fixes the verified 南一 case:
+    PPTX q4 -> heading:解析 / 100% / explanation > 0
+    DOCX q4 -> explanation = 0
+    => PPTX MUST win.
     """
     errors, raw_sources = [], []
     candidates = {}
 
-    def _candidate_quality(block, uploaded_name):
+    def _candidate_record(block, uploaded_name):
         block = (block or "").strip()
-        if not block:
-            return (-1, -1, -1, -1, -1)
-
         analysis, method, confidence = _publisher_analysis_candidate(block)
-        analysis_len = len((analysis or "").strip())
-        headed = 1 if str(method).startswith("heading:") else 0
-        has_analysis_word = 1 if re.search(r"(?:^|\n)\s*(?:解析|詳解)\s*[:：]?", block) else 0
+        analysis = (analysis or "").strip()
+        method = str(method or "none")
+        confidence = float(confidence or 0)
 
         ext = Path(uploaded_name).suffix.lower()
+        has_explanation = 1 if analysis else 0
+        headed = 1 if method.startswith("heading:") else 0
+        explicit_marker = 1 if re.search(
+            r"(?:^|\n)\s*(?:【\s*)?(?:試題解析|解析|詳解|解題)(?:\s*】)?\s*[：:]?",
+            block
+        ) else 0
         dedicated_pptx = 1 if (
             ext == ".pptx"
-            and ("解析" in block or "詳解" in block)
-            and ("答案" in block or analysis_len > 0)
+            and has_explanation
+            and (explicit_marker or "答案" in block)
         ) else 0
 
-        # Lexicographic tuple: explanation reliability dominates raw length.
-        return (
+        score = (
+            has_explanation,          # HARD priority
             headed,
-            has_analysis_word,
-            int(round(float(confidence or 0) * 1000)),
-            analysis_len,
-            dedicated_pptx * 100000 + len(block),
+            explicit_marker,
+            int(round(confidence * 1000)),
+            len(analysis),
+            dedicated_pptx,
+            len(block),
         )
+        return {
+            "source": uploaded_name,
+            "block": block,
+            "analysis": analysis,
+            "method": method,
+            "confidence": confidence,
+            "score": score,
+        }
 
     for uploaded in files or []:
         try:
@@ -2734,12 +2747,13 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None):
             for q, block in parsed.items():
                 block = (block or "").strip()
                 if block:
-                    candidates.setdefault(str(q), []).append((uploaded.name, block))
+                    candidates.setdefault(str(q), []).append(
+                        _candidate_record(block, uploaded.name)
+                    )
         except Exception as e:
             errors.append(f"{uploaded.name}：{e}")
 
-    # Missing-number recovery remains available, but recovered blocks are only
-    # additional candidates. They can win only if they are genuinely better.
+    # Missing-question recovery adds candidates only; it never overwrites a better one.
     if expected_count:
         present = set(candidates.keys())
         missing = [q for q in range(1, expected_count + 1) if str(q) not in present]
@@ -2749,54 +2763,71 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None):
                 break
             recovered = _recover_missing_question_blocks(raw, missing, expected_count)
             for q, block in recovered.items():
-                if (block or "").strip():
-                    candidates.setdefault(str(q), []).append((source_name, block.strip()))
+                block = (block or "").strip()
+                if block:
+                    candidates.setdefault(str(q), []).append(
+                        _candidate_record(block, source_name)
+                    )
             present = set(candidates.keys())
             missing = [q for q in range(1, expected_count + 1) if str(q) not in present]
 
         if missing and question_bank:
             recovered = _recover_by_question_bank(raw_sources, missing, question_bank)
             for q, block in recovered.items():
-                if (block or "").strip():
-                    candidates.setdefault(str(q), []).append(("內容比對復原", block.strip()))
+                block = (block or "").strip()
+                if block:
+                    candidates.setdefault(str(q), []).append(
+                        _candidate_record(block, "內容比對復原")
+                    )
 
     combined = {}
     merge_debug = {}
 
     for q, items in candidates.items():
-        # Remove exact duplicate blocks first.
+        # Exact-block dedupe.
         unique = []
         seen = set()
-        for source_name, block in items:
-            sig = _norm_cmp_text(block)
+        for rec in items:
+            sig = _norm_cmp_text(rec["block"])
             if not sig or sig in seen:
                 continue
             seen.add(sig)
-            unique.append((source_name, block))
+            unique.append(rec)
 
-        ranked = sorted(
-            unique,
-            key=lambda item: _candidate_quality(item[1], item[0]),
-            reverse=True
-        )
-        if not ranked:
+        if not unique:
             continue
 
-        winner_name, winner_block = ranked[0]
-        combined[str(q)] = winner_block
+        ranked = sorted(unique, key=lambda r: r["score"], reverse=True)
+        winner = ranked[0]
+        combined[str(q)] = winner["block"]
 
-        winner_analysis, winner_method, winner_conf = _publisher_analysis_candidate(winner_block)
         merge_debug[str(q)] = {
-            "winner": winner_name,
+            "winner": winner["source"],
             "candidate_count": len(ranked),
-            "method": winner_method,
-            "confidence": float(winner_conf or 0),
-            "analysis_chars": len((winner_analysis or "").strip()),
-            "block_chars": len(winner_block),
+            "method": winner["method"],
+            "confidence": winner["confidence"],
+            "analysis_chars": len(winner["analysis"]),
+            "block_chars": len(winner["block"]),
+            "has_explanation": bool(winner["analysis"]),
+            "candidates": [
+                {
+                    "source": r["source"],
+                    "method": r["method"],
+                    "confidence": r["confidence"],
+                    "analysis_chars": len(r["analysis"]),
+                    "block_chars": len(r["block"]),
+                    "has_explanation": bool(r["analysis"]),
+                }
+                for r in ranked
+            ],
         }
 
-    # Expose diagnostics without changing the persisted reference_db schema.
-    st.session_state["_publisher_merge_debug_last"] = merge_debug
+    # Store diagnostics PER publisher, never in one shared bucket.
+    pub_key = debug_pub_name or "未命名出版社"
+    all_debug = st.session_state.get("_publisher_merge_debug_by_pub", {}) or {}
+    all_debug[pub_key] = merge_debug
+    st.session_state["_publisher_merge_debug_by_pub"] = all_debug
+
     return combined, errors
 
 def _norm_cmp_text(s):
@@ -3538,7 +3569,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.10 transparent recommendation evidence fields
+    # v6.13.11 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4505,7 +4536,7 @@ def _rebuild_reference_db_from_project_sources():
     for prefix, pub in prefix_map.items():
         if not grouped[prefix]:
             continue
-        parsed, errs = _parse_publisher_files(grouped[prefix], expected, questions)
+        parsed, errs = _parse_publisher_files(grouped[prefix], expected, questions, debug_pub_name=pub)
         errors.extend(errs)
         if parsed:
             newdb["publisher"][pub] = parsed
@@ -5042,7 +5073,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.13.10 — hard reset only the annual reference layer.
+    # v6.13.11 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5113,7 +5144,7 @@ with ref_tab:
 
             if st.button("執行逐題解析測試", key=f"run_ref_parse_test_{_ref_gen}"):
                 parsed_test, test_errs = _parse_publisher_files(
-                    test_files, expected_for_refs, st.session_state.questions
+                    test_files, expected_for_refs, st.session_state.questions, debug_pub_name=test_pub
                 )
                 st.write(f"辨識到 **{len(parsed_test)} 題**。")
                 if test_errs:
@@ -5137,7 +5168,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.13.10: UPDATE semantics, not destructive rebuild semantics.
+        # v6.13.11: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -5172,7 +5203,7 @@ with ref_tab:
         for pub, fileset in [("翰林", hanlin_files), ("康軒", kang_files), ("南一", nanyi_files)]:
             if not fileset:
                 continue
-            parsed, errs = _parse_publisher_files(fileset, expected_for_refs, st.session_state.questions)
+            parsed, errs = _parse_publisher_files(fileset, expected_for_refs, st.session_state.questions, debug_pub_name=pub)
             all_errors.extend(errs)
             if parsed:
                 newdb["publisher"][pub] = parsed
@@ -5210,12 +5241,18 @@ with ref_tab:
             qdict = newdb.get("publisher", {}).get(pub, {}) or {}
             q4_block = qdict.get("4", "")
             q4_analysis = _publisher_analysis_only(q4_block) if q4_block else ""
-            _merge_q4 = (st.session_state.get("_publisher_merge_debug_last", {}) or {}).get("4", {})
+            _debug_by_pub = st.session_state.get("_publisher_merge_debug_by_pub", {}) or {}
+            _merge_q4 = ((_debug_by_pub.get(pub, {}) or {}).get("4", {}) or {})
             check[pub] = {
                 "題數": len(qdict),
                 "第4題區塊字數": len(q4_block),
                 "第4題詳解字數": len(q4_analysis),
                 "第4題本次擇優來源": _merge_q4.get("winner", "—") if q4_block else "—",
+                "第4題擇優方法": _merge_q4.get("method", "—") if q4_block else "—",
+                "第4題擇優信心": (
+                    f"{float(_merge_q4.get('confidence', 0)):.0%}"
+                    if _merge_q4 else "—"
+                ),
             }
         st.session_state["_last_reference_write_check"] = check
 
@@ -5243,6 +5280,25 @@ with ref_tab:
                 hide_index=True,
                 use_container_width=True
             )
+            _dbg_pub = st.session_state.get("_publisher_merge_debug_by_pub", {}) or {}
+            if "南一" in _dbg_pub and "4" in (_dbg_pub.get("南一", {}) or {}):
+                _n4 = _dbg_pub["南一"]["4"]
+                with st.expander("🔎 南一第4題候選來源比較", expanded=False):
+                    st.dataframe(
+                        [
+                            {
+                                "來源": c.get("source", ""),
+                                "擷取方法": c.get("method", ""),
+                                "信心值": f"{float(c.get('confidence',0)):.0%}",
+                                "詳解字數": c.get("analysis_chars", 0),
+                                "區塊字數": c.get("block_chars", 0),
+                                "有詳解": "是" if c.get("has_explanation") else "否",
+                            }
+                            for c in _n4.get("candidates", [])
+                        ],
+                        hide_index=True,
+                        use_container_width=True
+                    )
             if st.button("關閉寫入結果", key="dismiss_reference_write_check"):
                 st.session_state.pop("_last_reference_write_check", None)
                 st.rerun()
@@ -6248,7 +6304,7 @@ with tab3:
                                     "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
                                 )
 
-                        # v6.13.10: reference source is display-only. Include a
+                        # v6.13.11: reference source is display-only. Include a
                         # content signature in widget keys so Streamlit can never
                         # reuse a stale blank value after the reference DB changes.
                         _ref_sig = hashlib.md5(
