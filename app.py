@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.14.0 詳解校對參考強化版"
+APP_VERSION = "Web v6.14.1 左右對照校訂工作台版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2674,7 +2674,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.14.0 hard rule:
+    v6.14.1 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2974,7 +2974,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.14.0: every publisher uses the SAME display/read sanitization path.
+    # v6.14.1: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2991,7 +2991,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.14.0:
+    v6.14.1:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3640,7 +3640,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.14.0 transparent recommendation evidence fields
+    # v6.14.1 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -5175,7 +5175,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.14.0 — hard reset only the annual reference layer.
+    # v6.14.1 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5270,7 +5270,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.14.0: UPDATE semantics, not destructive rebuild semantics.
+        # v6.14.1: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6345,208 +6345,94 @@ with tab3:
         reviewed_count = sum(1 for x in st.session_state.questions if x.workbench_reviewed)
         st.caption(f"教師詳解人工確認進度：{reviewed_count}/{len(st.session_state.questions)} 題")
 
-        left, right = st.columns([0.88, 1.12])
+        st.markdown("### 🔎 左右對照校訂工作台")
+        st.caption("左側固定參考資料；右側固定校訂稿。切換出版社或歷年教師版時，可持續在右側直接修改。")
 
-        with left:
-            st.markdown(f"### 原第 {q.source_no} 題")
-            if q.material.strip():
-                st.markdown("**閱讀／共用材料**")
-                st.write(q.material)
-            st.markdown("**題幹**")
-            st.write(q.text)
-            for k, v in q.options.items():
-                st.write(f"({k}) {v}")
-            st.caption(
-                f"官方答案：{q.answer or '—'}｜通過率："
-                f"{q.pass_rate if q.pass_rate is not None else '—'}｜原頁：{q.page_no}"
-            )
-            if q.crop_png:
-                st.image(q.crop_png, caption="原 PDF 題目區塊", use_container_width=True)
+        _nav1, _nav2, _nav3 = st.columns([1, 2, 1])
+        _all_workbench_nos = choices
+        _current_idx = _all_workbench_nos.index(qno)
+        with _nav1:
+            if st.button("← 上一題", disabled=(_current_idx == 0), use_container_width=True, key=f"wb_prev_{qno}"):
+                st.session_state["workbench_qno"] = _all_workbench_nos[_current_idx - 1]
+                st.rerun()
+        with _nav2:
+            st.markdown(f"**第 {q.source_no} 題｜{q.category or getattr(q, 'suggested_category', '') or '尚未分類'}**")
+        with _nav3:
+            if st.button("下一題 →", disabled=(_current_idx >= len(_all_workbench_nos)-1), use_container_width=True, key=f"wb_next_{qno}"):
+                st.session_state["workbench_qno"] = _all_workbench_nos[_current_idx + 1]
+                st.rerun()
 
-        with right:
-            st.markdown("### 🔎 校對參考總覽")
-            st.caption(
-                "校對詳解與教學步驟時，右側固定提供三家出版社解析、歷年同題型教師版與 ChatGPT 撰寫依據。"
-                "以下內容全部沿用既有資料與既有辨識結果，不重新改寫來源。"
-            )
-
-            _review_tabs = st.tabs(["三家出版社", "歷年同題型教師版", "ChatGPT 建議／依據"])
-
-            with _review_tabs[0]:
-                st.markdown("### 一、三家出版社原始詳解")
-                st.caption(
-                    "維持原本三家並列介面，只改善完整度：優先顯示本題完整詳解；"
-                    "翰林、康軒、南一現在統一先做題界清理，再顯示本題來源；"
-                    "若需要核對題目或原始來源，可展開查看清理後的完整題塊。"
-                )
-                pub_tabs = st.tabs(["翰林", "康軒", "南一"])
-                for ptab, pub in zip(pub_tabs, ["翰林", "康軒", "南一"]):
-                    with ptab:
-                        raw_block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
-                        block = _sanitize_publisher_reference_for_display(raw_block, q.source_no)
-                        if block:
-                            full_analysis, detect_method, detect_confidence, direct_block = _publisher_best_analysis(
-                                refdb, pub, q.source_no
-                            )
-                            # direct_block is already sanitized through the same common path.
-                            block = direct_block or block
-
-                            if detect_method.startswith("heading:"):
-                                st.success("🟢 已辨識完整詳解（來源有明確詳解／解析標題）")
-                            elif detect_method == "heuristic-markerless":
-                                st.info(
-                                    f"🔵 已辨識無標題詳解（格式推定信心 {detect_confidence:.0%}）。"
-                                    "請以來源原文核對；程式沒有新增任何出版社原文中不存在的內容。"
-                                )
-                            elif detect_method == "legacy-orphan-recovered":
-                                st.info(
-                                    "🔷 已從舊參考庫其他區塊找回本題詳解。"
-                                    "表示舊版把詳解存到錯誤題號區塊；新版只重新配對既有原文。"
-                                )
-                            else:
-                                saved_sources = st.session_state.get("project_sources", {}) or {}
-                                pub_prefix = {"翰林":"hanlin_", "康軒":"kangxuan_", "南一":"nanyi_"}[pub]
-                                has_original = any(str(k).startswith(pub_prefix) for k in saved_sources.keys())
-                                if has_original:
-                                    st.warning(
-                                        "🟡 本題目前未可靠辨識到詳解，但專案中有保存這一家原始來源檔；"
-                                        "可回②年度資料執行重新建立參考庫。"
-                                    )
-                                else:
-                                    st.warning(
-                                        "🟠 目前這份舊專案 ZIP 沒有保存這一家出版社的原始來源檔，"
-                                        "而既有參考庫中也找不到本題詳解文字。"
-                                        "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
-                                    )
-
-                            # v6.14.0: reference source is display-only. Include a
-                            # content signature in widget keys so Streamlit can never
-                            # reuse a stale blank value after the reference DB changes.
-                            _ref_sig = hashlib.md5(
-                                (str(block) + "\n" + str(full_analysis)).encode("utf-8", errors="ignore")
-                            ).hexdigest()[:10]
-                            st.text_area(
-                                f"{pub}第{q.source_no}題完整詳解",
-                                value=full_analysis or "（目前沒有可可靠辨識的詳解內容）",
-                                height=360,
-                                key=f"ref_{pub}_{qno}_{_ref_sig}",
-                                label_visibility="collapsed",
-                                disabled=True
-                            )
-                            with st.expander("查看本題完整來源", expanded=False):
-                                st.text_area(
-                                    f"{pub}第{q.source_no}題完整來源",
-                                    value=block,
-                                    height=420,
-                                    key=f"ref_full_{pub}_{qno}_{_ref_sig}",
-                                    label_visibility="collapsed",
-                                    disabled=True
-                                )
+        ref_col, edit_col = st.columns([0.46, 0.54], gap="large")
+        with ref_col:
+            st.markdown("## 左側｜校對參考資料")
+            ref_tabs = st.tabs(["翰林", "康軒", "南一", "歷年教師版", "原題"])
+            for _tab, pub in zip(ref_tabs[:3], ["翰林", "康軒", "南一"]):
+                with _tab:
+                    raw_block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
+                    block = _sanitize_publisher_reference_for_display(raw_block, q.source_no)
+                    if block:
+                        full_analysis, detect_method, detect_confidence, direct_block = _publisher_best_analysis(refdb, pub, q.source_no)
+                        block = direct_block or block
+                        if detect_method.startswith("heading:"):
+                            st.success("已辨識完整詳解")
+                        elif detect_method == "heuristic-markerless":
+                            st.info(f"無標題詳解｜辨識信心 {detect_confidence:.0%}")
+                        elif detect_method == "legacy-orphan-recovered":
+                            st.info("已從舊參考庫重新配對本題詳解")
                         else:
-                            st.info("目前年度參考庫沒有辨識到這一題，請回「① 年度資料」檢查來源檔。")
-
-
-            with _review_tabs[1]:
+                            st.warning("目前未可靠辨識本題詳解，請以完整來源核對。")
+                        _ref_sig = hashlib.md5((str(block)+"\\n"+str(full_analysis)).encode("utf-8", errors="ignore")).hexdigest()[:10]
+                        st.text_area(f"{pub}第{q.source_no}題詳解",
+                                     value=full_analysis or "（目前沒有可可靠辨識的詳解內容）",
+                                     height=520, key=f"side_ref_{pub}_{qno}_{_ref_sig}",
+                                     disabled=True, label_visibility="collapsed")
+                        with st.expander("查看清理後完整來源", expanded=False):
+                            st.text_area(f"{pub}第{q.source_no}題完整來源", value=block, height=420,
+                                         key=f"side_ref_full_{pub}_{qno}_{_ref_sig}",
+                                         disabled=True, label_visibility="collapsed")
+                    else:
+                        st.info("目前年度參考庫沒有辨識到這一題。")
+            with ref_tabs[3]:
                 _review_category = q.category or getattr(q, "suggested_category", "") or ""
                 if _review_category:
-                    st.info(f"目前以能力類型「{_review_category}」尋找歷年教師版對應內容。")
+                    st.caption(f"依目前能力類型「{_review_category}」尋找歷年同題型。")
                     _review_examples = _history_examples_for_category(refdb, _review_category)
                     if not _review_examples:
-                        st.caption("目前參考庫沒有找到同能力類型的歷年教師版題目。")
+                        st.info("目前參考庫沒有找到同能力類型的歷年教師版。")
                     for _ri, (_source, _excerpt) in enumerate(_review_examples, 1):
                         _sec = _history_teacher_sections(_excerpt)
-                        with st.expander(f"{_source}", expanded=(_ri <= 2)):
-                            st.markdown("**題目**")
-                            st.text_area(
-                                f"review_hist_q_{qno}_{_ri}",
-                                value=_sec.get("question") or "（未擷取到題目）",
-                                height=130, disabled=True,
-                                key=f"review_hist_q_{qno}_{_ri}",
-                                label_visibility="collapsed"
-                            )
+                        with st.expander(f"{_source}", expanded=(_ri == 1)):
                             st.markdown("**解析**")
-                            st.text_area(
-                                f"review_hist_exp_{qno}_{_ri}",
-                                value=_sec.get("analysis") or "（來源中目前未成功擷取到解析）",
-                                height=180, disabled=True,
-                                key=f"review_hist_exp_{qno}_{_ri}",
-                                label_visibility="collapsed"
-                            )
-                            _hc1, _hc2 = st.columns(2)
-                            with _hc1:
-                                st.markdown("**教學重點**")
-                                st.text_area(
-                                    f"review_hist_focus_{qno}_{_ri}",
-                                    value=_sec.get("focus") or "（來源中目前未成功擷取到教學重點）",
-                                    height=150, disabled=True,
-                                    key=f"review_hist_focus_{qno}_{_ri}",
-                                    label_visibility="collapsed"
-                                )
-                            with _hc2:
-                                st.markdown("**教學步驟**")
-                                st.text_area(
-                                    f"review_hist_teach_{qno}_{_ri}",
-                                    value=_sec.get("teaching") or "（來源中目前未成功擷取到教學步驟）",
-                                    height=210, disabled=True,
-                                    key=f"review_hist_teach_{qno}_{_ri}",
-                                    label_visibility="collapsed"
-                                )
+                            st.text_area(f"side_hist_exp_{qno}_{_ri}", value=_sec.get("analysis") or "（未擷取到解析）",
+                                         height=180, disabled=True, key=f"side_hist_exp_{qno}_{_ri}", label_visibility="collapsed")
+                            st.markdown("**教學重點**")
+                            st.text_area(f"side_hist_focus_{qno}_{_ri}", value=_sec.get("focus") or "（未擷取到教學重點）",
+                                         height=120, disabled=True, key=f"side_hist_focus_{qno}_{_ri}", label_visibility="collapsed")
+                            st.markdown("**教學步驟**")
+                            st.text_area(f"side_hist_teach_{qno}_{_ri}", value=_sec.get("teaching") or "（未擷取到教學步驟）",
+                                         height=210, disabled=True, key=f"side_hist_teach_{qno}_{_ri}", label_visibility="collapsed")
                             if _sec.get("note"):
                                 st.markdown("**筆記策略**")
-                                st.text_area(
-                                    f"review_hist_note_{qno}_{_ri}",
-                                    value=_sec.get("note", ""),
-                                    height=150, disabled=True,
-                                    key=f"review_hist_note_{qno}_{_ri}",
-                                    label_visibility="collapsed"
-                                )
+                                st.text_area(f"side_hist_note_{qno}_{_ri}", value=_sec.get("note",""), height=130,
+                                             disabled=True, key=f"side_hist_note_{qno}_{_ri}", label_visibility="collapsed")
                 else:
-                    st.caption("請先確認本題能力類型，才能精準列出歷年同題型教師版。")
+                    st.info("請先確認能力類型，才能列出歷年同題型教師版。")
+            with ref_tabs[4]:
+                if q.material.strip():
+                    st.markdown("**閱讀／共用材料**")
+                    st.write(q.material)
+                st.markdown("**題幹**")
+                st.write(q.text)
+                for k, v in q.options.items():
+                    st.write(f"({k}) {v}")
+                st.caption(f"官方答案：{q.answer or '—'}｜通過率：{q.pass_rate if q.pass_rate is not None else '—'}｜原頁：{q.page_no}")
+                if q.crop_png:
+                    st.image(q.crop_png, caption="原 PDF 題目區塊", use_container_width=True)
 
-            with _review_tabs[2]:
-                st.markdown("**本題 ChatGPT 分析／撰寫依據**")
-                st.caption(
-                    "只顯示目前專案／JSON 已經保存的內容；沒有的欄位不會自行補造。"
-                )
-                _basis_parts = []
-                if getattr(q, "category_reason", ""):
-                    _basis_parts.append("【能力類型判斷理由】\\n" + q.category_reason)
-                if getattr(q, "synthesis_notes", ""):
-                    _basis_parts.append("【三家比較／綜合筆記】\\n" + q.synthesis_notes)
-                if getattr(q, "lexical_verification", ""):
-                    _basis_parts.append("【字詞查證紀錄】\\n" + q.lexical_verification)
-                st.text_area(
-                    "ChatGPT 建議依據",
-                    value="\\n\\n".join(_basis_parts) or "（目前專案中沒有可顯示的建議依據內容）",
-                    height=260, disabled=True,
-                    key=f"review_ai_basis_{qno}",
-                    label_visibility="collapsed"
-                )
-                _ac1, _ac2 = st.columns(2)
-                with _ac1:
-                    st.markdown("**目前建議詳解**")
-                    st.text_area(
-                        f"review_ai_exp_{qno}",
-                        value=getattr(q, "explanation", "") or "（尚無）",
-                        height=230, disabled=True,
-                        key=f"review_ai_exp_{qno}",
-                        label_visibility="collapsed"
-                    )
-                with _ac2:
-                    st.markdown("**目前建議教學步驟**")
-                    st.text_area(
-                        f"review_ai_teach_{qno}",
-                        value=getattr(q, "teaching", "") or "（尚無）",
-                        height=230, disabled=True,
-                        key=f"review_ai_teach_{qno}",
-                        label_visibility="collapsed"
-                    )
-
-            # v6.4: after JSON import, synchronize the Question model into
-            # widget state BEFORE those widgets are instantiated in this rerun.
-            # This prevents stale/blank widget state from hiding imported content.
+        with edit_col:
+            st.markdown("## 右側｜本題校訂稿（直接修改）")
+            st.caption("右側就是目前專案正式內容；左側切換任何參考頁籤時，這些欄位仍留在同一畫面。")
             if st.session_state.pop(f"_chatgpt_sync_{qno}", False):
-                st.session_state[f"cat_{qno}"] = q.category or ""
                 st.session_state[f"syn_{qno}"] = q.synthesis_notes or ""
                 st.session_state[f"lex_{qno}"] = q.lexical_verification or ""
                 st.session_state[f"exp_{qno}"] = q.explanation or ""
@@ -6554,341 +6440,391 @@ with tab3:
                 st.session_state[f"teach_{qno}"] = q.teaching or ""
                 st.session_state[f"note_{qno}"] = q.note_strategy or ""
                 st.session_state[f"note_table_{qno}"] = q.note_strategy_table_json or ""
-                st.session_state[f"custom_cat_{qno}"] = ""
-                st.session_state[f"chatgpt_full_import_notice_{qno}"] = True
-
-            st.markdown("### 二、能力類型：AI 建議＋人工確認")
-            if getattr(q, "suggested_category", ""):
-                st.success(f"AI 建議：**{q.suggested_category}**")
-                if getattr(q, "alternative_category", ""):
-                    st.caption(f"備選：{q.alternative_category}")
-                if getattr(q, "category_reason", ""):
-                    st.info("判斷理由：" + q.category_reason)
-            else:
-                st.caption("目前尚無 AI 能力類型建議。使用上方整批 ChatGPT 分析流程後，會依歷年分類資料提供首選、備選與理由。")
-
-            # Final category remains fully editable by the user.
-            base_options = list(ABILITY_OPTIONS)
-            for extra in [getattr(q, "suggested_category", ""), getattr(q, "alternative_category", ""), q.category]:
-                if extra and extra not in base_options:
-                    base_options.append(extra)
-            current = q.category if q.category in base_options else ""
-            selected_category = st.selectbox(
-                "最終能力類型（可自行調整）",
-                base_options,
-                index=base_options.index(current),
-                key=f"cat_{qno}",
-                help="AI 只提供建議；這裡才是最後採用的分類，你可以改成其他既有類別。"
-            )
-            custom_category = st.text_input(
-                "自訂能力類型（選填）",
-                value="",
-                key=f"custom_cat_{qno}",
-                placeholder="若既有選項都不適合，可自行輸入；留白則採用上方選擇。"
-            )
-            q.category = custom_category.strip() or selected_category
-
-            strategy = _strategy_for_category(refdb, q.category or "其他")
-            if q.category:
-                st.markdown("**依本團隊歷年寫法整理的教學框架**")
-                st.info(strategy.get("教學重點", ""))
-                st.text_area(
-                    "詳細教學步驟框架",
-                    value=strategy.get("教學步驟", ""),
-                    height=250,
-                    key=f"strategy_preview_{qno}"
-                )
-                examples = _history_examples_for_category(refdb, q.category)
-                with st.expander(f"查看歷年同題型教師版摘錄（{len(examples)} 題）", expanded=False):
-                    st.caption(
-                        "維持原本『依能力類型找歷年題』的功能，只改善內容呈現："
-                        "把完整題塊中的解析、教學重點、教學步驟與筆記策略分開顯示，方便直接核對我們以前的寫法。"
-                    )
-                    if not examples:
-                        st.caption("目前年度參考包內沒有找到同能力類型的歷年題目。")
-                    for idx, (source, excerpt) in enumerate(examples, 1):
-                        sections = _history_teacher_sections(excerpt)
-                        st.markdown(f"**{source}**")
-                        if "舊檔重組" in source:
-                            got = []
-                            if sections.get("analysis"): got.append("解析")
-                            if sections.get("focus"): got.append("教學重點")
-                            if sections.get("teaching"): got.append("教學步驟")
-                            if sections.get("note"): got.append("筆記策略")
-                            st.success(
-                                "🟢 已重新配對本題；目前實際擷取到："
-                                + ("／".join(got) if got else "尚未辨識到教師欄位")
-                            )
-
-                        with st.expander("題目", expanded=False):
-                            st.text_area(
-                                f"hist_q_{idx}_{qno}",
-                                value=sections.get("question", ""),
-                                height=180,
-                                key=f"hist_q_{idx}_{qno}",
-                                label_visibility="collapsed"
-                            )
-
-                        st.markdown("**解析**")
-                        st.text_area(
-                            f"hist_exp_{idx}_{qno}",
-                            value=sections.get("analysis") or "（來源中目前未成功擷取到解析）",
-                            height=220,
-                            key=f"hist_exp_{idx}_{qno}",
-                            label_visibility="collapsed"
-                        )
-
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.markdown("**教學重點**")
-                            st.text_area(
-                                f"hist_focus_{idx}_{qno}",
-                                value=sections.get("focus") or "（來源中目前未成功擷取到教學重點）",
-                                height=170,
-                                key=f"hist_focus_{idx}_{qno}",
-                                label_visibility="collapsed"
-                            )
-                        with c2:
-                            st.markdown("**教學步驟**")
-                            st.text_area(
-                                f"hist_teach_{idx}_{qno}",
-                                value=sections.get("teaching") or "（來源中目前未成功擷取到教學步驟）",
-                                height=250,
-                                key=f"hist_teach_{idx}_{qno}",
-                                label_visibility="collapsed"
-                            )
-
-                        if sections.get("note"):
-                            st.markdown("**筆記策略**")
-                            st.text_area(
-                                f"hist_note_{idx}_{qno}",
-                                value=sections.get("note", ""),
-                                height=150,
-                                key=f"hist_note_{idx}_{qno}",
-                                label_visibility="collapsed"
-                            )
-                        st.divider()
-
-            with st.expander("進階／單題重做：ChatGPT 整合（平常不需要開啟）", expanded=False):
-                st.caption("只有某一題需要個別重做時才使用。一般產製請使用本頁最上方的「本次教材整批產製」流程。")
-                st.markdown("### 三、單題 ChatGPT 重做（選用）")
-                st.caption(
-                    "這裡會把「今年題目＋三家出版社＋本團隊歷年同能力類型寫法＋教學框架」"
-                    "整理成一份完整分析包。你可以直接複製到目前的 ChatGPT 對話，"
-                    "讓 ChatGPT 依指定格式產生更接近可直接使用的詳解與教學步驟。"
-                )
-
-                analysis_package = _build_chatgpt_analysis_package(refdb, q)
-                with st.expander("📋 查看／複製本題 ChatGPT 分析包", expanded=False):
-                    st.text_area(
-                        "本題分析包",
-                        value=analysis_package,
-                        height=420,
-                        key=f"chatgpt_package_{qno}",
-                        help="全選後複製到 ChatGPT 即可。"
-                    )
-                    st.download_button(
-                        "⬇️ 下載本題分析包 TXT",
-                        data=analysis_package.encode("utf-8"),
-                        file_name=f"{int(st.session_state.year)}_第{qno}題_ChatGPT分析包.txt",
-                        mime="text/plain",
-                        key=f"download_chatgpt_package_{qno}",
-                        use_container_width=True
-                    )
-
-                st.markdown("**把 ChatGPT 回傳的六段整合稿貼回來：**")
-                pasted_result = st.text_area(
-                    "ChatGPT 整合結果",
-                    height=300,
-                    key=f"chatgpt_result_{qno}",
-                    placeholder="請貼上包含【三家比較筆記】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】的完整結果。"
-                )
-
-                def _import_chatgpt_result_callback():
-                    parsed, err = _parse_chatgpt_integrated_result(
-                        st.session_state.get(f"chatgpt_result_{qno}", "")
-                    )
-                    if err:
-                        st.session_state[f"chatgpt_import_error_{qno}"] = err
-                        return
-
-                    st.session_state[f"syn_{qno}"] = parsed["synthesis_notes"]
-                    st.session_state[f"lex_{qno}"] = parsed.get("lexical_verification", "")
-                    st.session_state[f"exp_{qno}"] = parsed["explanation"]
-                    st.session_state[f"focus_{qno}"] = parsed["teaching_focus"]
-                    st.session_state[f"teach_{qno}"] = parsed["teaching"]
-                    st.session_state[f"note_{qno}"] = parsed["note_strategy"]
-
-                    q.synthesis_notes = parsed["synthesis_notes"]
-                    q.lexical_verification = parsed.get("lexical_verification", "")
-                    q.explanation = parsed["explanation"]
-                    q.teaching_focus = parsed["teaching_focus"]
-                    q.teaching = parsed["teaching"]
-                    q.note_strategy = parsed["note_strategy"]
-                    st.session_state[f"chatgpt_import_success_{qno}"] = True
-
-                st.button(
-                    "⬇️ 匯入 ChatGPT 整合稿到本題欄位",
-                    key=f"import_chatgpt_result_{qno}",
-                    on_click=_import_chatgpt_result_callback,
-                    use_container_width=True,
-                    type="primary"
-                )
-
-                import_err = st.session_state.pop(f"chatgpt_import_error_{qno}", None)
-                if import_err:
-                    st.error(f"匯入失敗：{import_err}")
-                if st.session_state.pop(f"chatgpt_import_success_{qno}", False):
-                    st.success("已匯入 ChatGPT 完成稿，可在下方直接檢查與人工修改。")
-
-            st.markdown("### 四、三家比較筆記")
-            if f"syn_{qno}" not in st.session_state:
-                st.session_state[f"syn_{qno}"] = q.synthesis_notes
-            q.synthesis_notes = st.text_area(
-                "請先記下：三家共同核心、哪一家解釋較完整、哪些選項理由值得保留、哪些內容可刪。",
-                height=180,
-                key=f"syn_{qno}"
-            )
-
-            st.markdown("### 五、字詞查證紀錄")
-            st.caption(
-                "只要詳解牽涉字詞義，固定依序查證：①教育部《國語辭典簡編本》→"
-                "②教育部《重編國語辭典修訂本》→③三家出版社。"
-            )
-            if f"lex_{qno}" not in st.session_state:
-                st.session_state[f"lex_{qno}"] = q.lexical_verification
-            q.lexical_verification = st.text_area(
-                "字詞查證紀錄",
-                height=130,
-                key=f"lex_{qno}",
-                placeholder="字詞｜採用來源｜適用義項／依義項整理｜必要說明"
-            )
-
-            st.markdown("### 六、本次整合建議稿（人工可修改）")
-            st.caption(
-                "正常流程：上傳 ChatGPT 完成稿 JSON 後，三家比較筆記、建議詳解、教學重點、"
-                "建議教學步驟與筆記策略會直接帶入；教師只需檢查與修改。"
-                "下方「產生規則式整合初稿」僅供沒有 ChatGPT 完成稿時備用，正常情況不需按。"
-            )
-            if st.session_state.pop(f"chatgpt_full_import_notice_{qno}", False):
-                st.success("已完整匯入 ChatGPT 完成稿：能力類型建議＋三家比較筆記＋字詞查證＋四項教材內容。可直接人工校訂。")
-
-            # Apply saved annual draft if available and the fields are still empty.
-            saved = refdb.get("drafts", {}).get(str(q.source_no), {})
-            if saved and not any([q.explanation, q.teaching_focus, q.teaching]):
-                q.category = saved.get("category", q.category)
-                q.synthesis_notes = saved.get("synthesis_notes", q.synthesis_notes)
-                q.explanation = saved.get("explanation", "")
-                q.teaching_focus = saved.get("teaching_focus", "")
-                q.teaching = saved.get("teaching", "")
-                q.note_strategy = saved.get("note_strategy", "")
-
-            for key, value in {
-                f"exp_{qno}": q.explanation,
-                f"focus_{qno}": q.teaching_focus,
-                f"teach_{qno}": q.teaching,
-                f"note_{qno}": q.note_strategy,
+            for _key, _value in {
+                f"syn_{qno}": q.synthesis_notes, f"lex_{qno}": q.lexical_verification,
+                f"exp_{qno}": q.explanation, f"focus_{qno}": q.teaching_focus,
+                f"teach_{qno}": q.teaching, f"note_{qno}": q.note_strategy,
+                f"note_table_{qno}": q.note_strategy_table_json or "",
             }.items():
-                if key not in st.session_state:
-                    st.session_state[key] = value
-
-            def _generate_integrated_draft_callback():
-                draft, err = _build_source_grounded_draft(refdb, q)
-                if err:
-                    st.session_state[f"draft_error_{qno}"] = err
-                    return
-
-                # Callback runs BEFORE the next script rerun, so Streamlit allows
-                # updating widget-backed session keys such as syn_{qno}.
-                st.session_state[f"exp_{qno}"] = draft["explanation"]
-                st.session_state[f"focus_{qno}"] = draft["teaching_focus"]
-                st.session_state[f"teach_{qno}"] = draft["teaching"]
-                st.session_state[f"note_{qno}"] = draft["note_strategy"]
-                st.session_state[f"syn_{qno}"] = draft["synthesis_notes"]
-
-                q.explanation = draft["explanation"]
-                q.teaching_focus = draft["teaching_focus"]
-                q.teaching = draft["teaching"]
-                q.note_strategy = draft["note_strategy"]
-                q.synthesis_notes = draft["synthesis_notes"]
-                st.session_state[f"draft_success_{qno}"] = True
-
-            draft_c1, draft_c2 = st.columns(2)
-            with draft_c1:
-                st.button(
-                    "⚙️ 備用：產生規則式整合初稿",
-                    key=f"build_integrated_draft_{qno}",
-                    use_container_width=True,
-                    help="依本年度已解析的三家出版社詳解＋本團隊能力類型教學框架產生可修改初稿。此功能不使用外部 AI/API。",
-                    on_click=_generate_integrated_draft_callback
-                )
-
-                if st.session_state.pop(f"draft_error_{qno}", None):
-                    st.error("無法產生初稿：本題目前缺少可用的出版社來源資料。")
-                if st.session_state.pop(f"draft_success_{qno}", False):
-                    st.success("已產生本題整合建議初稿，可直接在下方修改。")
-
-            def _apply_strategy_callback():
-                strategy = _strategy_for_category(refdb, q.category or "其他")
-                st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
-                st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
-                st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
-                q.teaching_focus = st.session_state[f"focus_{qno}"]
-                q.teaching = st.session_state[f"teach_{qno}"]
-                q.note_strategy = st.session_state[f"note_{qno}"]
-
-            with draft_c2:
-                st.button(
-                    "套用本能力類型的詳細教學框架",
-                    key=f"apply_strategy_{qno}",
-                    use_container_width=True,
-                    on_click=_apply_strategy_callback
-                )
-
+                if _key not in st.session_state:
+                    st.session_state[_key] = _value
+            _basis_parts = []
+            if getattr(q, "category_reason", ""):
+                _basis_parts.append("【能力類型判斷理由】\\n" + q.category_reason)
+            if getattr(q, "synthesis_notes", ""):
+                _basis_parts.append("【三家比較／綜合筆記】\\n" + q.synthesis_notes)
+            if getattr(q, "lexical_verification", ""):
+                _basis_parts.append("【字詞查證紀錄】\\n" + q.lexical_verification)
+            with st.expander("📌 ChatGPT 撰寫依據／三家比較／字詞查證", expanded=False):
+                st.text_area("目前保存的撰寫依據", value="\\n\\n".join(_basis_parts) or "（目前沒有可顯示的依據內容）",
+                             height=260, disabled=True, key=f"side_ai_basis_{qno}", label_visibility="collapsed")
             q.explanation = st.text_area("建議詳解", height=300, key=f"exp_{qno}")
-            q.teaching_focus = st.text_area("教學重點", height=100, key=f"focus_{qno}")
-            q.teaching = st.text_area("建議教學步驟", height=300, key=f"teach_{qno}")
-            q.note_strategy = st.text_area("筆記策略（選填）", height=130, key=f"note_{qno}")
-
-            if f"note_table_{qno}" not in st.session_state:
-                st.session_state[f"note_table_{qno}"] = q.note_strategy_table_json or ""
-            with st.expander("📋 建議語文筆記表格（有可跨題複習內容時才使用）", expanded=bool(q.note_strategy_table_json)):
-                st.caption("筆記策略用來整理可跨題記憶的字、詞與語文知識，不是解當下題目的選項分析。字詞類優先使用「詞語／解釋」兩欄；不適合就留白。")
-                q.note_strategy_table_json = st.text_area(
-                    "筆記策略表格 JSON",
-                    height=180,
-                    key=f"note_table_{qno}",
-                    placeholder='{"title":"學生課堂即時筆記如下：","columns":["詞語","解釋"],"rows":[["立「即」","立刻、當下"]],"footer":""}'
-                )
+            q.teaching_focus = st.text_area("教學重點", height=120, key=f"focus_{qno}")
+            q.teaching = st.text_area("建議教學步驟", height=330, key=f"teach_{qno}")
+            q.note_strategy = st.text_area("筆記策略（選填）", height=140, key=f"note_{qno}")
+            with st.expander("📋 語文知識筆記表格", expanded=bool(q.note_strategy_table_json)):
+                q.note_strategy_table_json = st.text_area("筆記策略表格 JSON", height=180, key=f"note_table_{qno}")
                 normalized_note_table = _normalize_language_note_table(q.note_strategy_table_json)
                 spec = _parse_note_strategy_table(normalized_note_table)
                 if spec:
                     st.markdown("**表格預覽**")
-                    st.dataframe([dict(zip(spec["columns"], row)) for row in spec["rows"]],
-                                 use_container_width=True, hide_index=True)
+                    st.dataframe([dict(zip(spec["columns"], row)) for row in spec["rows"]], use_container_width=True, hide_index=True)
                     if spec["footer"]:
                         st.caption(spec["footer"])
                 elif q.note_strategy_table_json.strip():
-                    st.warning(
-                        "這個表格不是有效的語文知識筆記格式，或仍含「選項／證據／判斷／共同點」等當題解題欄位；"
-                        "Word 會略過。字詞類請優先使用「詞語／解釋」兩欄。"
+                    st.warning("目前表格格式無法辨識，Word 會略過。")
+            q.workbench_reviewed = st.checkbox("本題詳解與教學步驟已人工確認",
+                                               value=q.workbench_reviewed, key=f"side_wb_reviewed_{qno}")
+            q.visual_mode = st.checkbox("輸出時保留原題裁圖", value=q.visual_mode, key=f"side_vis_{qno}")
+        st.divider()
+        st.caption("下方完整保留原本的能力類型、三家比較筆記、字詞查證、單題重做與整合建議功能。")
+        # v6.4: after JSON import, synchronize the Question model into
+        # widget state BEFORE those widgets are instantiated in this rerun.
+        # This prevents stale/blank widget state from hiding imported content.
+        if st.session_state.pop(f"_chatgpt_sync_{qno}", False):
+            st.session_state[f"cat_{qno}"] = q.category or ""
+            st.session_state[f"syn_{qno}"] = q.synthesis_notes or ""
+            st.session_state[f"lex_{qno}"] = q.lexical_verification or ""
+            st.session_state[f"exp_{qno}"] = q.explanation or ""
+            st.session_state[f"focus_{qno}"] = q.teaching_focus or ""
+            st.session_state[f"teach_{qno}"] = q.teaching or ""
+            st.session_state[f"note_{qno}"] = q.note_strategy or ""
+            st.session_state[f"note_table_{qno}"] = q.note_strategy_table_json or ""
+            st.session_state[f"custom_cat_{qno}"] = ""
+            st.session_state[f"chatgpt_full_import_notice_{qno}"] = True
+
+        st.markdown("### 二、能力類型：AI 建議＋人工確認")
+        if getattr(q, "suggested_category", ""):
+            st.success(f"AI 建議：**{q.suggested_category}**")
+            if getattr(q, "alternative_category", ""):
+                st.caption(f"備選：{q.alternative_category}")
+            if getattr(q, "category_reason", ""):
+                st.info("判斷理由：" + q.category_reason)
+        else:
+            st.caption("目前尚無 AI 能力類型建議。使用上方整批 ChatGPT 分析流程後，會依歷年分類資料提供首選、備選與理由。")
+
+        # Final category remains fully editable by the user.
+        base_options = list(ABILITY_OPTIONS)
+        for extra in [getattr(q, "suggested_category", ""), getattr(q, "alternative_category", ""), q.category]:
+            if extra and extra not in base_options:
+                base_options.append(extra)
+        current = q.category if q.category in base_options else ""
+        selected_category = st.selectbox(
+            "最終能力類型（可自行調整）",
+            base_options,
+            index=base_options.index(current),
+            key=f"cat_{qno}",
+            help="AI 只提供建議；這裡才是最後採用的分類，你可以改成其他既有類別。"
+        )
+        custom_category = st.text_input(
+            "自訂能力類型（選填）",
+            value="",
+            key=f"custom_cat_{qno}",
+            placeholder="若既有選項都不適合，可自行輸入；留白則採用上方選擇。"
+        )
+        q.category = custom_category.strip() or selected_category
+
+        strategy = _strategy_for_category(refdb, q.category or "其他")
+        if q.category:
+            st.markdown("**依本團隊歷年寫法整理的教學框架**")
+            st.info(strategy.get("教學重點", ""))
+            st.text_area(
+                "詳細教學步驟框架",
+                value=strategy.get("教學步驟", ""),
+                height=250,
+                key=f"strategy_preview_{qno}"
+            )
+            examples = _history_examples_for_category(refdb, q.category)
+            with st.expander(f"查看歷年同題型教師版摘錄（{len(examples)} 題）", expanded=False):
+                st.caption(
+                    "維持原本『依能力類型找歷年題』的功能，只改善內容呈現："
+                    "把完整題塊中的解析、教學重點、教學步驟與筆記策略分開顯示，方便直接核對我們以前的寫法。"
+                )
+                if not examples:
+                    st.caption("目前年度參考包內沒有找到同能力類型的歷年題目。")
+                for idx, (source, excerpt) in enumerate(examples, 1):
+                    sections = _history_teacher_sections(excerpt)
+                    st.markdown(f"**{source}**")
+                    if "舊檔重組" in source:
+                        got = []
+                        if sections.get("analysis"): got.append("解析")
+                        if sections.get("focus"): got.append("教學重點")
+                        if sections.get("teaching"): got.append("教學步驟")
+                        if sections.get("note"): got.append("筆記策略")
+                        st.success(
+                            "🟢 已重新配對本題；目前實際擷取到："
+                            + ("／".join(got) if got else "尚未辨識到教師欄位")
+                        )
+
+                    with st.expander("題目", expanded=False):
+                        st.text_area(
+                            f"hist_q_{idx}_{qno}",
+                            value=sections.get("question", ""),
+                            height=180,
+                            key=f"hist_q_{idx}_{qno}",
+                            label_visibility="collapsed"
+                        )
+
+                    st.markdown("**解析**")
+                    st.text_area(
+                        f"hist_exp_{idx}_{qno}",
+                        value=sections.get("analysis") or "（來源中目前未成功擷取到解析）",
+                        height=220,
+                        key=f"hist_exp_{idx}_{qno}",
+                        label_visibility="collapsed"
                     )
 
-            q.workbench_reviewed = st.checkbox(
-                "本題詳解與教學步驟已人工確認",
-                value=q.workbench_reviewed,
-                key=f"wb_reviewed_{qno}"
-            )
-            q.visual_mode = st.checkbox(
-                "輸出時保留原題裁圖（適合圖片／表格／複雜版面）",
-                value=q.visual_mode,
-                key=f"vis_{qno}"
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown("**教學重點**")
+                        st.text_area(
+                            f"hist_focus_{idx}_{qno}",
+                            value=sections.get("focus") or "（來源中目前未成功擷取到教學重點）",
+                            height=170,
+                            key=f"hist_focus_{idx}_{qno}",
+                            label_visibility="collapsed"
+                        )
+                    with c2:
+                        st.markdown("**教學步驟**")
+                        st.text_area(
+                            f"hist_teach_{idx}_{qno}",
+                            value=sections.get("teaching") or "（來源中目前未成功擷取到教學步驟）",
+                            height=250,
+                            key=f"hist_teach_{idx}_{qno}",
+                            label_visibility="collapsed"
+                        )
+
+                    if sections.get("note"):
+                        st.markdown("**筆記策略**")
+                        st.text_area(
+                            f"hist_note_{idx}_{qno}",
+                            value=sections.get("note", ""),
+                            height=150,
+                            key=f"hist_note_{idx}_{qno}",
+                            label_visibility="collapsed"
+                        )
+                    st.divider()
+
+        with st.expander("進階／單題重做：ChatGPT 整合（平常不需要開啟）", expanded=False):
+            st.caption("只有某一題需要個別重做時才使用。一般產製請使用本頁最上方的「本次教材整批產製」流程。")
+            st.markdown("### 三、單題 ChatGPT 重做（選用）")
+            st.caption(
+                "這裡會把「今年題目＋三家出版社＋本團隊歷年同能力類型寫法＋教學框架」"
+                "整理成一份完整分析包。你可以直接複製到目前的 ChatGPT 對話，"
+                "讓 ChatGPT 依指定格式產生更接近可直接使用的詳解與教學步驟。"
             )
 
-            st.info(
-                "跨年度原則：出版社詳解、內部教師版與整合建議稿都放在「年度資料包」，"
-                "Python 程式本身不綁定 115 年。隔年只更換資料包即可。"
+            analysis_package = _build_chatgpt_analysis_package(refdb, q)
+            with st.expander("📋 查看／複製本題 ChatGPT 分析包", expanded=False):
+                st.text_area(
+                    "本題分析包",
+                    value=analysis_package,
+                    height=420,
+                    key=f"chatgpt_package_{qno}",
+                    help="全選後複製到 ChatGPT 即可。"
+                )
+                st.download_button(
+                    "⬇️ 下載本題分析包 TXT",
+                    data=analysis_package.encode("utf-8"),
+                    file_name=f"{int(st.session_state.year)}_第{qno}題_ChatGPT分析包.txt",
+                    mime="text/plain",
+                    key=f"download_chatgpt_package_{qno}",
+                    use_container_width=True
+                )
+
+            st.markdown("**把 ChatGPT 回傳的六段整合稿貼回來：**")
+            pasted_result = st.text_area(
+                "ChatGPT 整合結果",
+                height=300,
+                key=f"chatgpt_result_{qno}",
+                placeholder="請貼上包含【三家比較筆記】【建議詳解】【教學重點】【建議教學步驟】【筆記策略】的完整結果。"
             )
+
+            def _import_chatgpt_result_callback():
+                parsed, err = _parse_chatgpt_integrated_result(
+                    st.session_state.get(f"chatgpt_result_{qno}", "")
+                )
+                if err:
+                    st.session_state[f"chatgpt_import_error_{qno}"] = err
+                    return
+
+                st.session_state[f"syn_{qno}"] = parsed["synthesis_notes"]
+                st.session_state[f"lex_{qno}"] = parsed.get("lexical_verification", "")
+                st.session_state[f"exp_{qno}"] = parsed["explanation"]
+                st.session_state[f"focus_{qno}"] = parsed["teaching_focus"]
+                st.session_state[f"teach_{qno}"] = parsed["teaching"]
+                st.session_state[f"note_{qno}"] = parsed["note_strategy"]
+
+                q.synthesis_notes = parsed["synthesis_notes"]
+                q.lexical_verification = parsed.get("lexical_verification", "")
+                q.explanation = parsed["explanation"]
+                q.teaching_focus = parsed["teaching_focus"]
+                q.teaching = parsed["teaching"]
+                q.note_strategy = parsed["note_strategy"]
+                st.session_state[f"chatgpt_import_success_{qno}"] = True
+
+            st.button(
+                "⬇️ 匯入 ChatGPT 整合稿到本題欄位",
+                key=f"import_chatgpt_result_{qno}",
+                on_click=_import_chatgpt_result_callback,
+                use_container_width=True,
+                type="primary"
+            )
+
+            import_err = st.session_state.pop(f"chatgpt_import_error_{qno}", None)
+            if import_err:
+                st.error(f"匯入失敗：{import_err}")
+            if st.session_state.pop(f"chatgpt_import_success_{qno}", False):
+                st.success("已匯入 ChatGPT 完成稿，可在下方直接檢查與人工修改。")
+
+        st.markdown("### 四、三家比較筆記")
+        if f"syn_{qno}" not in st.session_state:
+            st.session_state[f"syn_{qno}"] = q.synthesis_notes
+        q.synthesis_notes = st.text_area(
+            "請先記下：三家共同核心、哪一家解釋較完整、哪些選項理由值得保留、哪些內容可刪。",
+            height=180,
+            key=f"syn_{qno}"
+        )
+
+        st.markdown("### 五、字詞查證紀錄")
+        st.caption(
+            "只要詳解牽涉字詞義，固定依序查證：①教育部《國語辭典簡編本》→"
+            "②教育部《重編國語辭典修訂本》→③三家出版社。"
+        )
+        if f"lex_{qno}" not in st.session_state:
+            st.session_state[f"lex_{qno}"] = q.lexical_verification
+        q.lexical_verification = st.text_area(
+            "字詞查證紀錄",
+            height=130,
+            key=f"lex_{qno}",
+            placeholder="字詞｜採用來源｜適用義項／依義項整理｜必要說明"
+        )
+
+        st.markdown("### 六、本次整合建議稿（人工可修改）")
+        st.caption(
+            "正常流程：上傳 ChatGPT 完成稿 JSON 後，三家比較筆記、建議詳解、教學重點、"
+            "建議教學步驟與筆記策略會直接帶入；教師只需檢查與修改。"
+            "下方「產生規則式整合初稿」僅供沒有 ChatGPT 完成稿時備用，正常情況不需按。"
+        )
+        if st.session_state.pop(f"chatgpt_full_import_notice_{qno}", False):
+            st.success("已完整匯入 ChatGPT 完成稿：能力類型建議＋三家比較筆記＋字詞查證＋四項教材內容。可直接人工校訂。")
+
+        # Apply saved annual draft if available and the fields are still empty.
+        saved = refdb.get("drafts", {}).get(str(q.source_no), {})
+        if saved and not any([q.explanation, q.teaching_focus, q.teaching]):
+            q.category = saved.get("category", q.category)
+            q.synthesis_notes = saved.get("synthesis_notes", q.synthesis_notes)
+            q.explanation = saved.get("explanation", "")
+            q.teaching_focus = saved.get("teaching_focus", "")
+            q.teaching = saved.get("teaching", "")
+            q.note_strategy = saved.get("note_strategy", "")
+
+        for key, value in {
+            f"exp_{qno}": q.explanation,
+            f"focus_{qno}": q.teaching_focus,
+            f"teach_{qno}": q.teaching,
+            f"note_{qno}": q.note_strategy,
+        }.items():
+            if key not in st.session_state:
+                st.session_state[key] = value
+
+        def _generate_integrated_draft_callback():
+            draft, err = _build_source_grounded_draft(refdb, q)
+            if err:
+                st.session_state[f"draft_error_{qno}"] = err
+                return
+
+            # Callback runs BEFORE the next script rerun, so Streamlit allows
+            # updating widget-backed session keys such as syn_{qno}.
+            st.session_state[f"exp_{qno}"] = draft["explanation"]
+            st.session_state[f"focus_{qno}"] = draft["teaching_focus"]
+            st.session_state[f"teach_{qno}"] = draft["teaching"]
+            st.session_state[f"note_{qno}"] = draft["note_strategy"]
+            st.session_state[f"syn_{qno}"] = draft["synthesis_notes"]
+
+            q.explanation = draft["explanation"]
+            q.teaching_focus = draft["teaching_focus"]
+            q.teaching = draft["teaching"]
+            q.note_strategy = draft["note_strategy"]
+            q.synthesis_notes = draft["synthesis_notes"]
+            st.session_state[f"draft_success_{qno}"] = True
+
+        draft_c1, draft_c2 = st.columns(2)
+        with draft_c1:
+            st.button(
+                "⚙️ 備用：產生規則式整合初稿",
+                key=f"build_integrated_draft_{qno}",
+                use_container_width=True,
+                help="依本年度已解析的三家出版社詳解＋本團隊能力類型教學框架產生可修改初稿。此功能不使用外部 AI/API。",
+                on_click=_generate_integrated_draft_callback
+            )
+
+            if st.session_state.pop(f"draft_error_{qno}", None):
+                st.error("無法產生初稿：本題目前缺少可用的出版社來源資料。")
+            if st.session_state.pop(f"draft_success_{qno}", False):
+                st.success("已產生本題整合建議初稿，可直接在下方修改。")
+
+        def _apply_strategy_callback():
+            strategy = _strategy_for_category(refdb, q.category or "其他")
+            st.session_state[f"focus_{qno}"] = strategy.get("教學重點", "")
+            st.session_state[f"teach_{qno}"] = strategy.get("教學步驟", "")
+            st.session_state[f"note_{qno}"] = strategy.get("筆記策略", "")
+            q.teaching_focus = st.session_state[f"focus_{qno}"]
+            q.teaching = st.session_state[f"teach_{qno}"]
+            q.note_strategy = st.session_state[f"note_{qno}"]
+
+        with draft_c2:
+            st.button(
+                "套用本能力類型的詳細教學框架",
+                key=f"apply_strategy_{qno}",
+                use_container_width=True,
+                on_click=_apply_strategy_callback
+            )
+
+        q.explanation = st.text_area("建議詳解", height=300, key=f"exp_{qno}")
+        q.teaching_focus = st.text_area("教學重點", height=100, key=f"focus_{qno}")
+        q.teaching = st.text_area("建議教學步驟", height=300, key=f"teach_{qno}")
+        q.note_strategy = st.text_area("筆記策略（選填）", height=130, key=f"note_{qno}")
+
+        if f"note_table_{qno}" not in st.session_state:
+            st.session_state[f"note_table_{qno}"] = q.note_strategy_table_json or ""
+        with st.expander("📋 建議語文筆記表格（有可跨題複習內容時才使用）", expanded=bool(q.note_strategy_table_json)):
+            st.caption("筆記策略用來整理可跨題記憶的字、詞與語文知識，不是解當下題目的選項分析。字詞類優先使用「詞語／解釋」兩欄；不適合就留白。")
+            q.note_strategy_table_json = st.text_area(
+                "筆記策略表格 JSON",
+                height=180,
+                key=f"note_table_{qno}",
+                placeholder='{"title":"學生課堂即時筆記如下：","columns":["詞語","解釋"],"rows":[["立「即」","立刻、當下"]],"footer":""}'
+            )
+            normalized_note_table = _normalize_language_note_table(q.note_strategy_table_json)
+            spec = _parse_note_strategy_table(normalized_note_table)
+            if spec:
+                st.markdown("**表格預覽**")
+                st.dataframe([dict(zip(spec["columns"], row)) for row in spec["rows"]],
+                             use_container_width=True, hide_index=True)
+                if spec["footer"]:
+                    st.caption(spec["footer"])
+            elif q.note_strategy_table_json.strip():
+                st.warning(
+                    "這個表格不是有效的語文知識筆記格式，或仍含「選項／證據／判斷／共同點」等當題解題欄位；"
+                    "Word 會略過。字詞類請優先使用「詞語／解釋」兩欄。"
+                )
+
+        q.workbench_reviewed = st.checkbox(
+            "本題詳解與教學步驟已人工確認",
+            value=q.workbench_reviewed,
+            key=f"wb_reviewed_{qno}"
+        )
+        q.visual_mode = st.checkbox(
+            "輸出時保留原題裁圖（適合圖片／表格／複雜版面）",
+            value=q.visual_mode,
+            key=f"vis_{qno}"
+        )
+
+        st.info(
+            "跨年度原則：出版社詳解、內部教師版與整合建議稿都放在「年度資料包」，"
+            "Python 程式本身不綁定 115 年。隔年只更換資料包即可。"
+        )
 
 with tab4:
     if not st.session_state.questions:
