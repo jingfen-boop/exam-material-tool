@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.15.4 文言文語譯 JSON 自動產出版"
+APP_VERSION = "Web v6.15.5 歷年知識考點精準配對版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2676,7 +2676,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.15.4 hard rule:
+    v6.15.5 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2976,7 +2976,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.15.4: every publisher uses the SAME display/read sanitization path.
+    # v6.15.5: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2993,7 +2993,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.15.4:
+    v6.15.5:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3251,14 +3251,77 @@ def _history_question_blocks(raw: str):
             })
     return blocks
 
-def _history_examples_for_category(refdb, category: str, limit=6):
-    """Return historical teacher examples; repair old all-questions-first references."""
+def _history_topic_profile(text: str):
+    """Identify concrete language-knowledge topics for historical matching."""
+    s = _match_norm(text or "")
+    groups = {
+        "六書造字": ("六書","造字","造字法","造字原則","象形","指事","會意","形聲","轉注","假借","說文解字","畫成其物","視而可識","比類合誼","以事為名"),
+        "字音": ("字音","讀音","注音","音讀","多音字","破音字"),
+        "字形": ("字形","形近字","錯別字","正字","部件","偏旁"),
+        "詞義成語": ("詞義","語詞","詞語","成語","語詞使用","語意"),
+        "標點": ("標點","逗號","句號","分號","冒號","引號","頓號","破折號"),
+        "修辭": ("修辭","譬喻","轉化","映襯","排比","借代","誇飾","設問"),
+        "文言": ("文言","語譯","古文","實詞","虛詞","古今異義"),
+    }
+    return {name for name, words in groups.items() if any(_match_norm(w) in s for w in words)}
+
+def _history_match_score(q, block: str, category: str = ""):
+    """Score by concrete knowledge topic first, category only second."""
+    if q is None:
+        return 0.0
+
+    qtext = " ".join([
+        getattr(q, "text", "") or "",
+        getattr(q, "material", "") or "",
+        " ".join((getattr(q, "options", {}) or {}).values()),
+        getattr(q, "category", "") or "",
+        getattr(q, "ability_reason", "") or "",
+        getattr(q, "comparison_note", "") or "",
+        getattr(q, "lexical_verification", "") or "",
+    ])
+    btext = block or ""
+    qn, bn = _match_norm(qtext), _match_norm(btext)
+    qt, bt = _history_topic_profile(qtext), _history_topic_profile(btext)
+
+    # Hard guard: a 六書／造字 question must not be matched to ordinary
+    # vocabulary/idiom questions merely because both are "字詞辨識".
+    if "六書造字" in qt and "六書造字" not in bt:
+        return 0.02
+
+    topic = 0.0
+    if qt and bt:
+        topic = 0.68 if (qt & bt) else -0.35
+
+    # Extra precision inside 六書.
+    six_terms = ("象形","指事","會意","形聲","轉注","假借","六書","造字")
+    q6 = {w for w in six_terms if _match_norm(w) in qn}
+    b6 = {w for w in six_terms if _match_norm(w) in bn}
+    specific = 0.18 if q6 and b6 and (q6 & b6) else 0.0
+
+    # Character n-gram overlap is only a supporting signal.
+    def grams(s, n=2):
+        s = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", s)
+        return {s[i:i+n] for i in range(max(0, len(s)-n+1))}
+    qg, bg = grams(qn), grams(bn)
+    overlap = len(qg & bg) / max(1, len(qg | bg))
+
+    cat_bonus = 0.10 if category and _match_norm(category) in bn else 0.0
+    return max(0.0, min(1.0, topic + specific + 0.22 * overlap + cat_bonus))
+
+def _history_examples_for_category(refdb, category: str, limit=6, q=None):
+    """Return historical teacher examples ranked by knowledge point, then category.
+
+    v6.15.5: if q is supplied, concrete language-knowledge topic outranks the
+    broad ability category. Low-relevance records are not promoted as primary
+    references.
+    """
     if not category:
         return []
     aliases={category}
     if category=="表層文意理解":
         aliases.add("表層文意")
-    out=[]
+
+    candidates=[]
     for source,raw in (refdb.get("history_raw",{}) or {}).items():
         repaired=_legacy_history_reconstructed_records(raw)
         if repaired:
@@ -3266,8 +3329,8 @@ def _history_examples_for_category(refdb, category: str, limit=6):
                 bcat=b.get("category","")
                 if not any(a==bcat or a in bcat for a in aliases):
                     continue
-                out.append((f"{source}｜歷年原第{b.get('qno','?')}題｜{bcat}｜舊檔重組", b["text"]))
-                if len(out)>=limit: return out
+                label=f"{source}｜歷年原第{b.get('qno','?')}題｜{bcat}｜舊檔重組"
+                candidates.append((label,b["text"]))
             continue
 
         blocks=_history_question_blocks(raw)
@@ -3276,8 +3339,8 @@ def _history_examples_for_category(refdb, category: str, limit=6):
                 bcat=b.get("category","")
                 if not any(a==bcat or a in bcat for a in aliases):
                     continue
-                out.append((f"{source}｜歷年原第{b.get('qno','?')}題｜{bcat}", b["text"]))
-                if len(out)>=limit: return out
+                label=f"{source}｜歷年原第{b.get('qno','?')}題｜{bcat}"
+                candidates.append((label,b["text"]))
             continue
 
         positions=[]
@@ -3286,9 +3349,21 @@ def _history_examples_for_category(refdb, category: str, limit=6):
         for pos in sorted(set(positions)):
             excerpt=raw[max(0,pos-280):min(len(raw),pos+1800)].strip()
             if excerpt:
-                out.append((source+"｜同能力類型摘錄",excerpt))
-                if len(out)>=limit: return out
-    return out
+                candidates.append((source+"｜同能力類型摘錄",excerpt))
+
+    if q is None:
+        return candidates[:limit]
+
+    ranked=[]
+    for label, block in candidates:
+        score=_history_match_score(q, block, category)
+        ranked.append((score,label,block))
+    ranked.sort(key=lambda x:x[0], reverse=True)
+
+    # Prefer genuinely related items. If none pass, show no historical item
+    # rather than a misleading same-category example.
+    good=[x for x in ranked if x[0] >= 0.30]
+    return [(f"{label}｜考點相關度 {score:.0%}", block) for score,label,block in good[:limit]]
 
 def _history_teacher_sections(block: str):
     """Extract internal teacher fields from one reconstructed historical item."""
@@ -3642,7 +3717,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.15.4 transparent recommendation evidence fields
+    # v6.15.5 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -3967,7 +4042,7 @@ def _build_source_grounded_draft(refdb, q):
     """
     pubs = _publisher_blocks_for_question(refdb, q.source_no)
     strategy = _strategy_for_category(refdb, q.category or "其他")
-    hist = _history_examples_for_category(refdb, q.category) if q.category else []
+    hist = _history_examples_for_category(refdb, q.category, q=q) if q.category else []
 
     if not pubs:
         return None, "三家出版社目前都沒有辨識到本題，無法建立來源有據的整合初稿。"
@@ -4048,7 +4123,7 @@ def _build_chatgpt_analysis_package(refdb, q):
     """Build one self-contained, source-grounded prompt package for this question."""
     pubs = _publisher_blocks_for_question(refdb, q.source_no)
     strategy = _strategy_for_category(refdb, q.category or "其他")
-    hist = _history_examples_for_category(refdb, q.category) if q.category else []
+    hist = _history_examples_for_category(refdb, q.category, q=q) if q.category else []
 
     option_lines = "\n".join(
         f"({k}) {v}" for k, v in (q.options or {}).items() if str(v or "").strip()
@@ -5274,7 +5349,7 @@ with setup_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.15.4 — hard reset only the annual reference layer.
+    # v6.15.5 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5369,7 +5444,7 @@ with setup_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.15.4: UPDATE semantics, not destructive rebuild semantics.
+        # v6.15.5: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6135,10 +6210,10 @@ with edit_tab:
             with ref_tabs[3]:
                 _review_category = q.category or getattr(q, "suggested_category", "") or ""
                 if _review_category:
-                    st.caption(f"依目前能力類型「{_review_category}」尋找歷年同題型。")
-                    _review_examples = _history_examples_for_category(refdb, _review_category)
+                    st.caption(f"先依具體語文知識考點／認知任務配對，再以能力類型「{_review_category}」作次要篩選。")
+                    _review_examples = _history_examples_for_category(refdb, _review_category, q=q)
                     if not _review_examples:
-                        st.info("目前參考庫沒有找到同能力類型的歷年教師版。")
+                        st.info("目前參考庫沒有找到知識考點足夠相近的歷年教師版；不以同能力類型但考點不同的題目硬湊。")
                     for _ri, (_source, _excerpt) in enumerate(_review_examples, 1):
                         _sec = _history_teacher_sections(_excerpt)
                         with st.expander(f"{_source}", expanded=(_ri == 1)):
