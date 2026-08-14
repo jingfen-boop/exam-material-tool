@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.14.3 題組原題完整上下文顯示版"
+APP_VERSION = "Web v6.15.0 四頁式工作流程整併版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2674,7 +2674,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.14.3 hard rule:
+    v6.15.0 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2974,7 +2974,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.14.3: every publisher uses the SAME display/read sanitization path.
+    # v6.15.0: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2991,7 +2991,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.14.3:
+    v6.15.0:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3640,7 +3640,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.14.3 transparent recommendation evidence fields
+    # v6.15.0 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -5142,13 +5142,77 @@ with pc2:
 
 st.divider()
 
-tab1, ref_tab, overview_tab, tab2, tab3, tab4 = st.tabs(["① 建立題庫", "② 年度資料", "③ 考題總覽暨校對", "④ 篩選組題", "⑤ 詳解工作台", "⑥ 產生 Word"])
+setup_tab, select_tab, edit_tab, output_tab = st.tabs([
+    "① 題本／參考庫",
+    "② 選題",
+    "③ 內容編輯與校訂",
+    "④ 預覽／輸出",
+])
+
+with setup_tab:
+    st.subheader("題本與參考庫")
+    st.caption("資料準備集中在這裡：建立題庫、管理年度出版社與歷年教師版參考庫。")
+    st.markdown("## A. 題本來源與題庫")
+    st.subheader("上傳三份來源")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        qfile = st.file_uploader("原始會考題本 PDF", type=["pdf"], key="qfile")
+    with c2:
+        afile = st.file_uploader("官方答案 PDF", type=["pdf"], key="afile")
+    with c3:
+        rfile = st.file_uploader("各題通過率 PDF", type=["pdf"], key="rfile")
+
+    if st.button("建立／更新題庫", type="primary", disabled=not (qfile and afile and rfile)):
+        with st.spinner("解析 PDF、題號、答案與通過率…"):
+            qbytes = qfile.getvalue()
+            _capture_source("question_pdf", qfile)
+            _capture_source("answer_pdf", afile)
+            _capture_source("rate_pdf", rfile)
+            answers = parse_answers(afile.getvalue())
+            rates = parse_pass_rates(rfile.getvalue())
+            expected_count = len(answers)
+            questions, page_images = extract_questions(qbytes, expected_count=expected_count)
+            questions = merge_metadata(questions, answers, rates)
+            st.session_state.questions = questions
+            _reset_fresh_bank_selection(st.session_state.questions)
+            st.session_state.page_images = page_images
+        expected = len(answers)
+        found_nos = {q.source_no for q in questions}
+        expected_nos = set(range(1, expected+1))
+        missing = sorted(expected_nos - found_nos)
+        if len(questions) == expected and len(rates) == expected and not missing and expected:
+            st.success(f"完成：辨識 {len(questions)} 題；國文答案 {len(answers)} 題；國文通過率 {len(rates)} 題。1～{expected} 題完整。")
+        else:
+            miss_text = "、".join(map(str,missing)) if missing else "無"
+            st.warning(f"解析完成但需校對：辨識 {len(questions)} 題；國文答案 {len(answers)} 題；國文通過率 {len(rates)} 題；缺題：{miss_text}。")
+
+    if st.session_state.questions:
+        data = []
+        for q in st.session_state.questions:
+            data.append({
+                "原題號": q.source_no,
+                "頁": q.page_no,
+                "答案": q.answer,
+                "通過率": q.pass_rate,
+                "題組": q.group_id,
+                "輸出模式": _effective_render_mode(q),
+                "選項": f"{len([v for v in q.options.values() if (v or '').strip()])}/4",
+                "有圖/複雜版面": "是" if q.visual_mode else "",
+                "校對": _question_structure_status(q),
+                "題幹預覽": q.text[:55].replace("\n"," ")
+            })
+        st.dataframe(data, use_container_width=True, hide_index=True)
 
 
-with ref_tab:
+        st.info(
+            "題庫已建立。題目內容的人工檢查、修改與校對狀態，"
+            "統一到「③ 內容編輯與校訂」處理，避免同一題在兩個頁面重複操作。"
+        )
+    st.divider()
+    st.markdown("## B. 年度參考庫")
     st.subheader(f"{int(st.session_state.year)} 年度資料與詳解參考庫")
     st.caption(
-        "建議先完成「① 建立題庫」，再建立出版社／內部詳解參考庫。這樣 B 區才能立即核對每家出版社是否完整對應本年度所有題目。"
+        "建議先完成「① 題本／參考庫」，再建立出版社／內部詳解參考庫。這樣 B 區才能立即核對每家出版社是否完整對應本年度所有題目。"
     )
 
     refdb = _load_reference_library()
@@ -5175,7 +5239,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.14.3 — hard reset only the annual reference layer.
+    # v6.15.0 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5270,7 +5334,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.14.3: UPDATE semantics, not destructive rebuild semantics.
+        # v6.15.0: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -5510,7 +5574,7 @@ with ref_tab:
                 "至少一家出版社仍有缺題。建議先回 A 區補資料或改用較容易解析的 DOCX／PPTX，再進入 C 區保存。"
             )
     else:
-        st.info("若要檢查出版社是否缺題，請先到「① 建立題庫」建立本年度題庫。")
+        st.info("若要檢查出版社是否缺題，請先到「① 題本／參考庫」建立本年度題庫。")
 
     st.divider()
 
@@ -5631,553 +5695,126 @@ with ref_tab:
         "下次直接從 D 載入 → 詳解工作完成後從 E 保存整合成果。"
     )
 
-with tab1:
-    st.subheader("上傳三份來源")
-    c1,c2,c3 = st.columns(3)
-    with c1:
-        qfile = st.file_uploader("原始會考題本 PDF", type=["pdf"], key="qfile")
-    with c2:
-        afile = st.file_uploader("官方答案 PDF", type=["pdf"], key="afile")
-    with c3:
-        rfile = st.file_uploader("各題通過率 PDF", type=["pdf"], key="rfile")
-
-    if st.button("建立／更新題庫", type="primary", disabled=not (qfile and afile and rfile)):
-        with st.spinner("解析 PDF、題號、答案與通過率…"):
-            qbytes = qfile.getvalue()
-            _capture_source("question_pdf", qfile)
-            _capture_source("answer_pdf", afile)
-            _capture_source("rate_pdf", rfile)
-            answers = parse_answers(afile.getvalue())
-            rates = parse_pass_rates(rfile.getvalue())
-            expected_count = len(answers)
-            questions, page_images = extract_questions(qbytes, expected_count=expected_count)
-            questions = merge_metadata(questions, answers, rates)
-            st.session_state.questions = questions
-            _reset_fresh_bank_selection(st.session_state.questions)
-            st.session_state.page_images = page_images
-        expected = len(answers)
-        found_nos = {q.source_no for q in questions}
-        expected_nos = set(range(1, expected+1))
-        missing = sorted(expected_nos - found_nos)
-        if len(questions) == expected and len(rates) == expected and not missing and expected:
-            st.success(f"完成：辨識 {len(questions)} 題；國文答案 {len(answers)} 題；國文通過率 {len(rates)} 題。1～{expected} 題完整。")
-        else:
-            miss_text = "、".join(map(str,missing)) if missing else "無"
-            st.warning(f"解析完成但需校對：辨識 {len(questions)} 題；國文答案 {len(answers)} 題；國文通過率 {len(rates)} 題；缺題：{miss_text}。")
-
-    if st.session_state.questions:
-        data = []
-        for q in st.session_state.questions:
-            data.append({
-                "原題號": q.source_no,
-                "頁": q.page_no,
-                "答案": q.answer,
-                "通過率": q.pass_rate,
-                "題組": q.group_id,
-                "輸出模式": _effective_render_mode(q),
-                "選項": f"{len([v for v in q.options.values() if (v or '').strip()])}/4",
-                "有圖/複雜版面": "是" if q.visual_mode else "",
-                "校對": _question_structure_status(q),
-                "題幹預覽": q.text[:55].replace("\n"," ")
-            })
-        st.dataframe(data, use_container_width=True, hide_index=True)
-
-
-        st.info(
-            "題庫已建立。題目內容的人工檢查、修改與校對狀態，"
-            "統一到「③ 考題總覽暨校對」處理，避免同一題在兩個頁面重複操作。"
-        )
-
-with overview_tab:
-    st.subheader("考題總覽暨校對")
+with select_tab:
+    st.subheader("選題")
     st.caption(
-        "這一頁同時是題庫總覽與人工校對中心。先看完整題目／題組，發現內容需要修正時直接展開「編輯／校對」。"
-        "一般單題逐題呈現；題組題則合併「共用閱讀材料／頂端題幹＋全部子題」，避免脫離脈絡。"
+        "這一頁只決定『本次要哪些題』。題幹、選項、題組與詳解的內容修改全部集中到③內容編輯與校訂。"
     )
-
     if not st.session_state.questions:
-        st.info("請先到「① 建立題庫」上傳題本、官方答案與通過率資料。")
+        st.info("請先到①題本／參考庫建立或載入題庫。")
     else:
-        questions = st.session_state.questions
-
-        # ---------- filters ----------
-        fc1, fc2, fc3, fc4, fc5 = st.columns([0.95, 0.8, 1.15, 1.0, 0.9])
-        with fc1:
-            rate_filter = st.selectbox(
-                "通過率",
-                ["全部", "80%以上", "60%～79.9%", "60%以下"],
-                key="overview_rate_filter"
-            )
-        with fc2:
-            answer_filter = st.selectbox(
-                "答案",
-                ["全部", "A", "B", "C", "D"],
-                key="overview_answer_filter"
-            )
-        with fc3:
-            keyword = st.text_input(
-                "題目／題組關鍵字",
-                placeholder="例如：文意、成語、人物…",
-                key="overview_keyword"
-            )
-        with fc4:
-            review_filter = st.selectbox(
-                "校對狀態",
-                ["全部", "待校對", "已校對", "題組題", "圖片／複雜版面"],
-                key="overview_review_filter"
-            )
-        with fc5:
-            only_selected = st.checkbox(
-                "只看已選",
-                value=False,
-                key="overview_only_selected"
-            )
-
-        def _norm_rate(q):
-            if q.pass_rate is None:
-                return None
-            r = float(q.pass_rate)
-            return r * 100 if r <= 1 else r
-
-        def _rate_ok(q):
-            r = _norm_rate(q)
-            if rate_filter == "全部":
-                return True
-            if r is None:
-                return False
-            if rate_filter == "80%以上":
-                return r >= 80
-            if rate_filter == "60%～79.9%":
-                return 60 <= r < 80
-            if rate_filter == "60%以下":
-                return r < 60
-            return True
-
-        def _question_haystack(q):
-            return " ".join([
-                q.group_intro or "",
-                q.material or "",
-                q.text or "",
-                " ".join((q.options or {}).values())
-            ])
-
-        def _question_matches(q):
-            if answer_filter != "全部" and q.answer != answer_filter:
-                return False
-            if not _rate_ok(q):
-                return False
-            if keyword.strip() and keyword.strip().lower() not in _question_haystack(q).lower():
-                return False
-            if review_filter == "待校對" and q.reviewed:
-                return False
-            if review_filter == "已校對" and not q.reviewed:
-                return False
-            if review_filter == "題組題" and not (q.group_id or "").strip():
-                return False
-            if review_filter == "圖片／複雜版面" and not (q.visual_mode or q.image_pngs or q.body_crop_png):
-                return False
-            if only_selected and not q.selected:
-                return False
-            return True
-
-        # ---------- build display units ----------
-        # A group is rendered once with all its children. If any child matches the
-        # filter, the whole group is shown so the reader never loses its context.
-        units = []
-        seen_groups = set()
-
-        for q in questions:
-            gid = (q.group_id or "").strip()
-            if gid:
-                if gid in seen_groups:
-                    continue
-                seen_groups.add(gid)
-                members = sorted(
-                    [x for x in questions if (x.group_id or "").strip() == gid],
-                    key=lambda x: x.source_no
-                )
-                if any(_question_matches(x) for x in members):
-                    units.append(("group", gid, members))
-            else:
-                if _question_matches(q):
-                    units.append(("single", str(q.source_no), [q]))
-
-        visible_question_nos = {
-            q.source_no
-            for kind, uid, members in units
-            for q in members
-        }
-
-        selected_count = sum(1 for q in questions if q.selected)
-        reviewed_count = sum(1 for q in questions if q.reviewed)
-        group_count = len({q.group_id for q in questions if (q.group_id or "").strip()})
-        issue_count = sum(1 for q in questions if not q.reviewed)
-
-        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-        mc1.metric("全部題數", len(questions))
-        mc2.metric("目前顯示", len(visible_question_nos))
-        mc3.metric("已校對", reviewed_count)
-        mc4.metric("待校對", issue_count)
-        mc5.metric("已選入題本", selected_count)
-
-        st.progress(reviewed_count / len(questions) if questions else 0)
-        st.caption(f"人工校對進度：{reviewed_count}/{len(questions)} 題｜題組：{group_count} 組")
-
-        bc1, bc2, bc3 = st.columns(3)
-        if bc1.button("清除全部選取", key="overview_clear_all", use_container_width=True):
-            for q in questions:
-                q.selected = False
-                st.session_state[f"sel_{q.source_no}"] = False
-                st.session_state[f"overview_select_{q.source_no}"] = False
-            for gid in {x.group_id for x in questions if (x.group_id or "").strip()}:
-                st.session_state[f"overview_group_select_{gid}"] = False
-            st.rerun()
-
-        if bc2.button("選取目前顯示結果", key="overview_select_visible", use_container_width=True):
-            for q in questions:
-                if q.source_no in visible_question_nos:
-                    q.selected = True
-                    st.session_state[f"sel_{q.source_no}"] = True
-                    st.session_state[f"overview_select_{q.source_no}"] = True
-            # Synchronize group-level checkboxes as well.
-            for gid in {x.group_id for x in questions if (x.group_id or "").strip()}:
-                members = [x for x in questions if (x.group_id or "").strip() == gid]
-                st.session_state[f"overview_group_select_{gid}"] = all(x.selected for x in members)
-            st.rerun()
-
-        if bc3.button("取消目前顯示結果", key="overview_unselect_visible", use_container_width=True):
-            for q in questions:
-                if q.source_no in visible_question_nos:
-                    q.selected = False
-                    st.session_state[f"sel_{q.source_no}"] = False
-                    st.session_state[f"overview_select_{q.source_no}"] = False
-            for gid in {x.group_id for x in questions if (x.group_id or "").strip()}:
-                members = [x for x in questions if (x.group_id or "").strip() == gid]
-                st.session_state[f"overview_group_select_{gid}"] = all(x.selected for x in members)
-            st.rerun()
-
-        st.divider()
-
-        if not units:
-            st.warning("目前篩選條件下沒有題目。")
-        else:
-            for kind, uid, members in units:
-                if kind == "group":
-                    first_no = min(x.source_no for x in members)
-                    last_no = max(x.source_no for x in members)
-                    group_title = uid if uid else f"{first_no}-{last_no}"
-
-                    st.markdown(f"## 題組 {group_title}｜原第 {first_no}～{last_no} 題")
-
-                    # Prefer explicit group_intro. Otherwise take the most complete
-                    # shared material available among children.
-                    intro_candidates = [
-                        (x.group_intro or "").strip()
-                        for x in members
-                        if (x.group_intro or "").strip()
-                    ]
-                    material_candidates = [
-                        (x.material or "").strip()
-                        for x in members
-                        if (x.material or "").strip()
-                    ]
-
-                    if intro_candidates:
-                        shared_intro = max(intro_candidates, key=len)
-                    elif material_candidates:
-                        shared_intro = max(material_candidates, key=len)
-                    else:
-                        shared_intro = ""
-
-                    shared_crops = []
-                    for x in members:
-                        if getattr(x, "group_crop_pngs", None):
-                            shared_crops = x.group_crop_pngs
-                            break
-
-                    st.markdown("### 共用閱讀材料／頂端題幹")
-                    if shared_crops:
-                        st.caption("以下先呈現原題本共用材料，確保圖表、版面與特殊符號完整。")
-                        for img in shared_crops:
-                            st.image(img, use_container_width=True)
-
-                    if shared_intro:
-                        with st.expander("查看／複製共用材料文字", expanded=False):
-                            st.write(shared_intro)
-                    elif not shared_crops:
-                        st.warning(
-                            "本題組目前沒有辨識到共用閱讀材料。請到「① 建立題庫 → 題目結構校對」"
-                            "把題組頂端文章／共用材料填入任一子題的「閱讀／共用材料」。"
-                        )
-
-                    # Whole-group selection: groups should not be split.
-                    all_selected = all(x.selected for x in members)
-                    some_selected = any(x.selected for x in members)
-                    if some_selected and not all_selected:
-                        st.warning("目前此題組只有部分子題被選取；題組題建議整組保留。")
-
-                    group_key = f"overview_group_select_{uid}"
-                    # On first render, initialize widget state from canonical Question.selected.
-                    if group_key not in st.session_state:
-                        st.session_state[group_key] = all_selected
-
-                    def _sync_overview_group_selection(
-                        gid=uid,
-                        member_nos=tuple(x.source_no for x in members),
-                        widget_key=group_key
-                    ):
-                        checked = bool(st.session_state.get(widget_key, False))
-                        for x in st.session_state.questions:
-                            if x.source_no in member_nos and (x.group_id or "").strip() == gid:
-                                x.selected = checked
-                                st.session_state[f"sel_{x.source_no}"] = checked
-                                st.session_state[f"overview_select_{x.source_no}"] = checked
-
-                    group_select = st.checkbox(
-                        f"整組加入本次題本（{len(members)} 題）",
-                        key=group_key,
-                        on_change=_sync_overview_group_selection,
-                        help="勾選後立即把此題組所有子題同步加入；取消則整組移除。"
-                    )
-
-                    # Render all subquestions together, each with answer and rate.
-                    for x in members:
-                        rate = _norm_rate(x)
-                        rate_text = "—" if rate is None else f"{rate:.1f}%"
-
-                        st.markdown(f"### 第 {x.source_no} 題　｜答案：**{x.answer or '—'}**　｜通過率：**{rate_text}**")
-
-                        # Avoid repeating the same shared material before every child.
-                        child_material = (x.material or "").strip()
-                        if child_material and child_material != shared_intro:
-                            st.markdown("**本子題附加材料**")
-                            st.write(child_material)
-
-                        st.write(x.text.strip() if x.text else "（題幹未辨識，請至建立題庫頁校對）")
-                        for letter in ["A", "B", "C", "D"]:
-                            val = (x.options or {}).get(letter, "")
-                            if val and val.strip():
-                                st.write(f"({letter}) {val.strip()}")
-
-                        status_text = "✅ 已校對" if x.reviewed else "⚠️ 待校對"
-                        with st.expander(f"✏️ 編輯／校對第 {x.source_no} 題｜{status_text}", expanded=False):
-                            _render_question_review_editor(
-                                x,
-                                key_prefix=f"overview_group_{uid}"
-                            )
-
-                    with st.expander("查看此題組原 PDF 裁圖", expanded=False):
-                        for x in members:
-                            if x.crop_png:
-                                st.markdown(f"**原第 {x.source_no} 題**")
-                                st.image(x.crop_png, use_container_width=True)
-
-                    st.divider()
-
-                else:
-                    q = members[0]
-                    rate = _norm_rate(q)
-                    rate_text = "—" if rate is None else f"{rate:.1f}%"
-
-                    card_left, card_right = st.columns([0.78, 0.22], vertical_alignment="top")
-                    with card_left:
-                        st.markdown(f"### 第 {q.source_no} 題")
-                        if q.material and q.material.strip():
-                            st.markdown("**閱讀／共用材料**")
-                            st.write(q.material.strip())
-
-                        st.markdown("**題目**")
-                        st.write(q.text.strip() if q.text else "（題幹未辨識，請至建立題庫頁校對）")
-                        for letter in ["A", "B", "C", "D"]:
-                            val = (q.options or {}).get(letter, "")
-                            if val and val.strip():
-                                st.write(f"({letter}) {val.strip()}")
-
-                    with card_right:
-                        st.markdown("**題目資訊**")
-                        st.write(f"答案：**{q.answer or '—'}**")
-                        st.write(f"通過率：**{rate_text}**")
-                        if q.category:
-                            st.write(f"能力：{q.category}")
-                        single_key = f"overview_select_{q.source_no}"
-                        if single_key not in st.session_state:
-                            st.session_state[single_key] = bool(q.selected)
-
-                        def _sync_overview_single_selection(
-                            source_no=q.source_no,
-                            widget_key=single_key
-                        ):
-                            checked = bool(st.session_state.get(widget_key, False))
-                            for item in st.session_state.questions:
-                                if item.source_no == source_no:
-                                    item.selected = checked
-                                    st.session_state[f"sel_{source_no}"] = checked
-                                    break
-
-                        st.checkbox(
-                            "加入本次題本",
-                            key=single_key,
-                            on_change=_sync_overview_single_selection,
-                            help="此勾選狀態會立即同步到④篩選組題、⑤詳解工作台、⑥Word與年度專案。"
-                        )
-
-                    status_text = "✅ 已校對" if q.reviewed else "⚠️ 待校對"
-                    with st.expander(f"✏️ 編輯／校對｜{status_text}", expanded=False):
-                        _render_question_review_editor(q, key_prefix="overview_single")
-
-                    with st.expander("查看原題裁圖", expanded=False):
-                        if q.crop_png:
-                            st.image(q.crop_png, use_container_width=True)
-                        else:
-                            st.caption("目前沒有原題裁圖。")
-                    st.divider()
-
-        st.info(
-            "建議操作：先利用「待校對」篩選逐題驗收 → 發現問題就地展開修改 → 全部校對完成後，"
-            "再利用通過率／關鍵字挑選題目 → 到「④ 篩選組題」做最後確認。"
-        )
-
-with tab2:
-    if not st.session_state.questions:
-        st.info("請先在「① 建立題庫」建立題庫，並到「③ 考題總覽暨校對」勾選要組題的題目。")
-    else:
-        st.subheader("篩選組題／最終確認")
-        st.caption(
-            "這一頁不再重新做一套獨立篩選。"
-            "目前題目完全承接「③ 考題總覽暨校對」中勾選的結果，"
-            "此處只負責最後確認、檢查題組完整性與必要的刪減。"
-        )
-
         qs = st.session_state.questions
         _sync_group_widget_state_to_questions(qs)
 
-        # Keep groups intact: if any member is selected in overview, the whole group
-        # becomes selected here. This matches the rule used by the overview.
-        selected_group_ids = {
-            q.group_id for q in qs
-            if q.selected and (q.group_id or "").strip()
-        }
-        for q in qs:
-            if q.group_id and q.group_id in selected_group_ids:
-                q.selected = True
-                st.session_state[f"sel_{q.source_no}"] = True
-                st.session_state[f"overview_select_{q.source_no}"] = True
-
-        selected = [q for q in qs if q.selected]
-
-        if not selected:
-            st.warning("目前沒有選取任何題目。請回「③ 考題總覽暨校對」勾選要收入題本的題目。")
-        else:
-            group_ids = sorted({
-                q.group_id for q in selected if (q.group_id or "").strip()
-            })
-
-            m1,m2,m3 = st.columns(3)
-            m1.metric("目前選取題數", len(selected))
-            m2.metric("題組數", len(group_ids))
-            m3.metric("單題數", len([q for q in selected if not (q.group_id or "").strip()]))
-
-            st.success(
-                "目前承接總覽勾選："
-                + "、".join(str(q.source_no) for q in selected)
+        fc1, fc2, fc3, fc4 = st.columns([1.0, 0.85, 1.45, 0.8])
+        with fc1:
+            _sel_rate = st.selectbox(
+                "通過率", ["全部", "80%以上", "60%～79.9%", "60%以下"], key="select_page_rate"
             )
+        with fc2:
+            _sel_answer = st.selectbox("答案", ["全部", "A", "B", "C", "D"], key="select_page_answer")
+        with fc3:
+            _sel_keyword = st.text_input("題目／題組關鍵字", key="select_page_keyword", placeholder="例如：文意、成語、投壺…")
+        with fc4:
+            _sel_only = st.checkbox("只看已選", key="select_page_only")
 
-            st.divider()
-            st.markdown("### 本次組題內容")
-            st.caption(
-                "若要新增題目，請回「③ 考題總覽暨校對」勾選；"
-                "這裡只提供最後取消，不會顯示未被總覽選取的題目。"
-            )
+        def _sel_rate_value(_q):
+            if _q.pass_rate is None:
+                return None
+            _r=float(_q.pass_rate)
+            return _r*100 if _r<=1 else _r
 
-            # Render units so grouped questions are confirmed as one set.
-            units=[]
-            seen=set()
-            for q in selected:
-                gid=(q.group_id or "").strip()
-                if gid:
-                    if gid in seen:
-                        continue
-                    seen.add(gid)
-                    members=sorted(
-                        [x for x in selected if (x.group_id or "").strip()==gid],
-                        key=lambda x:x.source_no
-                    )
-                    units.append(("group",gid,members))
-                else:
-                    units.append(("single",str(q.source_no),[q]))
+        def _sel_match(_q):
+            _r=_sel_rate_value(_q)
+            if _sel_rate == "80%以上" and (_r is None or _r < 80): return False
+            if _sel_rate == "60%～79.9%" and (_r is None or not (60 <= _r < 80)): return False
+            if _sel_rate == "60%以下" and (_r is None or _r >= 60): return False
+            if _sel_answer != "全部" and _q.answer != _sel_answer: return False
+            _hay=" ".join([_q.group_intro or "", _q.material or "", _q.text or "", " ".join((_q.options or {}).values())])
+            if _sel_keyword.strip() and _sel_keyword.strip().lower() not in _hay.lower(): return False
+            if _sel_only and not _q.selected: return False
+            return True
 
-            for kind,uid,members in units:
-                if kind=="group":
-                    nos=[x.source_no for x in members]
-                    avg_rates=[
-                        float(x.pass_rate) for x in members if x.pass_rate is not None
-                    ]
-                    avg_text="—" if not avg_rates else f"{sum(avg_rates)/len(avg_rates):.2f}"
-                    st.markdown(
-                        f"**題組 {uid}｜原第 {min(nos)}～{max(nos)} 題｜"
-                        f"{len(members)} 題｜平均通過率 {avg_text}**"
-                    )
-                    for x in members:
-                        rate="—" if x.pass_rate is None else f"{x.pass_rate:.2f}"
-                        st.write(
-                            f"第 {x.source_no} 題｜答案 {x.answer or '—'}｜通過率 {rate}｜"
-                            f"{x.text[:55].replace(chr(10),' ')}"
-                        )
+        _units=[]; _seen=set()
+        for _q in qs:
+            _gid=(_q.group_id or "").strip()
+            if _gid:
+                if _gid in _seen: continue
+                _seen.add(_gid)
+                _members=sorted([x for x in qs if (x.group_id or "").strip()==_gid], key=lambda x:x.source_no)
+                if any(_sel_match(x) for x in _members): _units.append(("group",_gid,_members))
+            elif _sel_match(_q):
+                _units.append(("single",str(_q.source_no),[_q]))
 
-                    if st.button(
-                        f"取消整個題組 {uid}",
-                        key=f"confirm_remove_group_{uid}",
-                        use_container_width=True
-                    ):
-                        for x in qs:
-                            if (x.group_id or "").strip()==uid:
-                                x.selected=False
-                                st.session_state[f"sel_{x.source_no}"]=False
-                                # sync overview checkbox if it exists
-                                ovkey=f"overview_group_select_{uid}"
-                                if ovkey in st.session_state:
-                                    st.session_state[ovkey]=False
-                        st.rerun()
+        _visible={x.source_no for _,_,ms in _units for x in ms}
+        m1,m2,m3,m4=st.columns(4)
+        m1.metric("全部題數",len(qs)); m2.metric("目前顯示",len(_visible))
+        m3.metric("已選",sum(1 for x in qs if x.selected)); m4.metric("題組",len({x.group_id for x in qs if (x.group_id or '').strip()}))
 
-                    st.divider()
+        b1,b2,b3=st.columns(3)
+        if b1.button("選取目前顯示",use_container_width=True,key="select_page_all_visible"):
+            for _q in qs:
+                if _q.source_no in _visible: _q.selected=True
+            st.rerun()
+        if b2.button("取消目前顯示",use_container_width=True,key="select_page_none_visible"):
+            for _q in qs:
+                if _q.source_no in _visible: _q.selected=False
+            st.rerun()
+        if b3.button("清除全部選取",use_container_width=True,key="select_page_clear"):
+            for _q in qs: _q.selected=False
+            st.rerun()
 
-                else:
-                    q=members[0]
-                    rate="—" if q.pass_rate is None else f"{q.pass_rate:.2f}"
-                    c1,c2=st.columns([0.78,0.22],vertical_alignment="center")
-                    with c1:
-                        st.markdown(
-                            f"**原第 {q.source_no} 題｜答案 {q.answer or '—'}｜通過率 {rate}**"
-                        )
-                        st.write(q.text[:120].replace("\n"," "))
-                    with c2:
-                        if st.button(
-                            "取消此題",
-                            key=f"confirm_remove_{q.source_no}",
-                            use_container_width=True
-                        ):
-                            q.selected=False
-                            st.session_state[f"sel_{q.source_no}"]=False
-                            ovkey=f"overview_select_{q.source_no}"
-                            if ovkey in st.session_state:
-                                st.session_state[ovkey]=False
-                            st.rerun()
-                    st.divider()
+        st.divider()
+        if not _units:
+            st.warning("目前篩選條件下沒有題目。")
+        for _kind,_uid,_members in _units:
+            if _kind=="group":
+                _first=min(x.source_no for x in _members); _last=max(x.source_no for x in _members)
+                _current=all(x.selected for x in _members)
+                _gkey=f"select_page_group_{_uid}"
+                if _gkey not in st.session_state: st.session_state[_gkey]=_current
+                _checked=st.checkbox(
+                    f"題組｜原第 {_first}～{_last} 題｜{len(_members)} 題",
+                    key=_gkey,
+                    help="題組採整組選取，避免只有子題而缺少共用題幹。"
+                )
+                for _q in _members:
+                    _q.selected=bool(_checked)
+                    st.session_state[f"sel_{_q.source_no}"]=bool(_checked)
+                with st.expander("預覽題組原題",expanded=False):
+                    _shown=False
+                    for _q in _members:
+                        if getattr(_q,'group_crop_pngs',None):
+                            for _img in _q.group_crop_pngs or []:
+                                st.image(_img,use_container_width=True)
+                            _shown=True; break
+                    for _q in _members:
+                        if _q.crop_png:
+                            st.image(_q.crop_png,caption=f"原第 {_q.source_no} 題",use_container_width=True)
+                            _shown=True
+                    if not _shown:
+                        st.write(max([x.material or x.group_intro or '' for x in _members],key=len,default=''))
+                st.divider()
+            else:
+                _q=_members[0]
+                _skey=f"select_page_single_{_q.source_no}"
+                if _skey not in st.session_state: st.session_state[_skey]=bool(_q.selected)
+                _checked=st.checkbox(
+                    f"原第 {_q.source_no} 題｜答案 {_q.answer or '—'}｜通過率 {_q.pass_rate if _q.pass_rate is not None else '—'}",
+                    key=_skey
+                )
+                _q.selected=bool(_checked); st.session_state[f"sel_{_q.source_no}"]=bool(_checked)
+                with st.expander("預覽原題",expanded=False):
+                    if _q.crop_png: st.image(_q.crop_png,use_container_width=True)
+                    else: st.write(_q.text)
+                st.divider()
 
-            selected_now=[q for q in qs if q.selected]
-            st.info(
-                f"最終目前共 {len(selected_now)} 題。"
-                "確認無誤後，直接進入「⑤ 詳解工作台」。"
-            )
+        _selected=[x for x in qs if x.selected]
+        st.success("目前已選：" + ("、".join(str(x.source_no) for x in _selected) if _selected else "尚未選題"))
 
-            if st.button(
-                "↩️ 回到考題總覽重新選題",
-                key="back_to_overview_note",
-                use_container_width=True
-            ):
-                st.info("請點上方「③ 考題總覽暨校對」頁籤進行新增或重新勾選。")
-
-with tab3:
+with edit_tab:
+    st.subheader("內容編輯與校訂")
+    st.caption("所有單題內容修改集中在這裡：題幹／選項／題組、出版社與歷年參考、ChatGPT 建議、詳解與教學步驟。")
     if not st.session_state.questions:
         st.info("請先建立題庫。")
     else:
@@ -6342,6 +5979,11 @@ with tab3:
         qno = st.selectbox("選擇題目", choices, key="workbench_qno")
         q = next(x for x in st.session_state.questions if x.source_no == qno)
 
+        st.markdown("### ✏️ 題目內容／結構校對")
+        st.caption("題幹、選項、題組、圖片與版型都在本頁處理；不必再回另一個考題總覽頁編輯。")
+        with st.expander("編輯題幹、選項、題組與版型", expanded=False):
+            _render_question_review_editor(q, key_prefix="content_editor")
+
         reviewed_count = sum(1 for x in st.session_state.questions if x.workbench_reviewed)
         st.caption(f"教師詳解人工確認進度：{reviewed_count}/{len(st.session_state.questions)} 題")
 
@@ -6418,7 +6060,7 @@ with tab3:
                 else:
                     st.info("請先確認能力類型，才能列出歷年同題型教師版。")
             with ref_tabs[4]:
-                # v6.14.3：題組題的「原題」必須先呈現整個題組共用題幹／閱讀材料，
+                # v6.15.0：題組題的「原題」必須先呈現整個題組共用題幹／閱讀材料，
                 # 再呈現目前子題；不能只顯示 q.crop_png。
                 _gid = (q.group_id or "").strip()
                 _group_members = []
@@ -6913,7 +6555,9 @@ with tab3:
             "Python 程式本身不綁定 115 年。隔年只更換資料包即可。"
         )
 
-with tab4:
+with output_tab:
+    st.subheader("預覽與輸出")
+    st.caption("輸出前檢查題目、題組、教師版／學生版與版面；內容有問題請回③修改。")
     if not st.session_state.questions:
         st.info("請先建立題庫。")
     else:
@@ -7089,3 +6733,4 @@ with tab4:
             file_name=f"{st.session_state.year}_國文題庫.json",
             mime="application/json"
         )
+
