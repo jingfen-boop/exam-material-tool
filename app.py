@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.13.13 出版社詳解儲存端＋顯示端雙重題界切割修正版"
+APP_VERSION = "Web v6.13.14 三家出版社統一顯示端題界清理修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2674,7 +2674,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.13.13 hard rule:
+    v6.13.14 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2974,9 +2974,16 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
+    # v6.13.14: every publisher uses the SAME display/read sanitization path.
+    # This applies to 翰林／康軒／南一 alike, including old reference_db content.
+    raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
+    block=_sanitize_publisher_reference_for_display(raw_block, qno)
+
     direct,method,confidence=_publisher_analysis_candidate(block)
+
     orphan=_publisher_orphan_explanation_index(refdb,pub).get(str(qno),"")
+    orphan=_sanitize_publisher_reference_for_display(orphan, qno) if orphan else ""
+
     if orphan and len(_norm_cmp_text(orphan))>len(_norm_cmp_text(direct))+30:
         return orphan,"legacy-orphan-recovered",0.90,block
     return direct,method,confidence,block
@@ -2984,7 +2991,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.13.13:
+    v6.13.14:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3164,7 +3171,8 @@ def _publisher_analysis_candidate(block: str):
     return analysis, "heuristic-markerless", confidence
 
 
-def _publisher_analysis_only(block: str) -> str:
+def _publisher_analysis_only(block: str, current_q=None) -> str:
+    block = _sanitize_publisher_reference_for_display(block, current_q)
     analysis, _, _ = _publisher_analysis_candidate(block)
     return analysis
 
@@ -3632,7 +3640,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.13.13 transparent recommendation evidence fields
+    # v6.13.14 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -5136,7 +5144,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.13.13 — hard reset only the annual reference layer.
+    # v6.13.14 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5231,7 +5239,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.13.13: UPDATE semantics, not destructive rebuild semantics.
+        # v6.13.14: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -5303,7 +5311,7 @@ with ref_tab:
         for pub in ("翰林", "康軒", "南一"):
             qdict = newdb.get("publisher", {}).get(pub, {}) or {}
             q4_block = qdict.get("4", "")
-            q4_analysis = _publisher_analysis_only(q4_block) if q4_block else ""
+            q4_analysis = _publisher_analysis_only(q4_block, 4) if q4_block else ""
             _debug_by_pub = st.session_state.get("_publisher_merge_debug_by_pub", {}) or {}
             _merge_q4 = ((_debug_by_pub.get(pub, {}) or {}).get("4", {}) or {})
             check[pub] = {
@@ -6328,16 +6336,20 @@ with tab3:
             st.markdown("### 一、三家出版社原始詳解")
             st.caption(
                 "維持原本三家並列介面，只改善完整度：優先顯示本題完整詳解；"
-                "若需要核對題目或原始來源，可展開查看完整題塊。"
+                "翰林、康軒、南一現在統一先做題界清理，再顯示本題來源；"
+                "若需要核對題目或原始來源，可展開查看清理後的完整題塊。"
             )
             pub_tabs = st.tabs(["翰林", "康軒", "南一"])
             for ptab, pub in zip(pub_tabs, ["翰林", "康軒", "南一"]):
                 with ptab:
-                    block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
+                    raw_block = refdb.get("publisher", {}).get(pub, {}).get(str(q.source_no), "")
+                    block = _sanitize_publisher_reference_for_display(raw_block, q.source_no)
                     if block:
                         full_analysis, detect_method, detect_confidence, direct_block = _publisher_best_analysis(
                             refdb, pub, q.source_no
                         )
+                        # direct_block is already sanitized through the same common path.
+                        block = direct_block or block
 
                         if detect_method.startswith("heading:"):
                             st.success("🟢 已辨識完整詳解（來源有明確詳解／解析標題）")
@@ -6367,7 +6379,7 @@ with tab3:
                                     "這不是再調整顯示就能補回；需要重新上傳這一家原始詳解檔一次。"
                                 )
 
-                        # v6.13.13: reference source is display-only. Include a
+                        # v6.13.14: reference source is display-only. Include a
                         # content signature in widget keys so Streamlit can never
                         # reuse a stale blank value after the reference DB changes.
                         _ref_sig = hashlib.md5(
