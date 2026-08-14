@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.15.5 歷年知識考點精準配對版"
+APP_VERSION = "Web v6.15.6 專案備份同步最新人工編輯版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2676,7 +2676,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.15.5 hard rule:
+    v6.15.6 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2976,7 +2976,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.15.5: every publisher uses the SAME display/read sanitization path.
+    # v6.15.6: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2993,7 +2993,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.15.5:
+    v6.15.6:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3311,7 +3311,7 @@ def _history_match_score(q, block: str, category: str = ""):
 def _history_examples_for_category(refdb, category: str, limit=6, q=None):
     """Return historical teacher examples ranked by knowledge point, then category.
 
-    v6.15.5: if q is supplied, concrete language-knowledge topic outranks the
+    v6.15.6: if q is supplied, concrete language-knowledge topic outranks the
     broad ability category. Low-relevance records are not promoted as primary
     references.
     """
@@ -3717,7 +3717,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.15.5 transparent recommendation evidence fields
+    # v6.15.6 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -4747,6 +4747,89 @@ def _rebuild_reference_db_from_project_sources():
 
 
 
+def _sync_live_editor_state_to_questions():
+    """Persist live Streamlit editor values into Question objects before ZIP export.
+
+    Why:
+    The project download control is rendered before the content editor later in
+    the script. On the rerun triggered by clicking Download, widget state already
+    contains the user's newest edits, but Question objects may still contain the
+    previous values. Without this sync, the ZIP can be one edit behind.
+
+    v6.15.6 syncs only known formal editor fields. Reference/source widgets are
+    intentionally excluded because they are copy-only and must never overwrite
+    reference_db.
+    """
+    questions = list(st.session_state.get("questions", []) or [])
+    if not questions:
+        return
+
+    for q in questions:
+        no = q.source_no
+
+        # Formal content editor fields
+        mapping = {
+            f"trans_{no}": "translation",
+            f"exp_{no}": "explanation",
+            f"syn_{no}": "synthesis_notes",
+            f"lex_{no}": "lexical_verification",
+            f"focus_{no}": "teaching_focus",
+            f"teach_{no}": "teaching",
+            f"note_{no}": "note_strategy",
+            f"note_table_{no}": "note_strategy_table_json",
+        }
+        for key, attr in mapping.items():
+            if key in st.session_state:
+                setattr(q, attr, st.session_state.get(key, ""))
+
+        # Review / visual output flags
+        for key in (f"wb_reviewed_{no}", f"side_wb_reviewed_{no}"):
+            if key in st.session_state:
+                q.workbench_reviewed = bool(st.session_state[key])
+        for key in (f"vis_{no}", f"side_vis_{no}"):
+            if key in st.session_state:
+                q.visual_mode = bool(st.session_state[key])
+
+        # Ability type can be edited in the workbench.
+        cat_key = f"cat_{no}"
+        custom_key = f"custom_cat_{no}"
+        if cat_key in st.session_state or custom_key in st.session_state:
+            custom = str(st.session_state.get(custom_key, "") or "").strip()
+            selected = str(st.session_state.get(cat_key, "") or "").strip()
+            q.category = custom or selected or q.category
+
+        # Structure editor fields. These use the active "content_editor" prefix
+        # in the integrated workbench. We sync them too so a project backup
+        # captures the current visible state even if the user has not clicked a
+        # separate save button immediately before downloading.
+        prefix = "content_editor"
+        def wk(field):
+            return f"{prefix}_{field}_{no}"
+
+        if wk("material") in st.session_state:
+            q.material = str(st.session_state[wk("material")] or "")
+        if wk("stem") in st.session_state:
+            q.text = str(st.session_state[wk("stem")] or "")
+        opts = dict(q.options or {})
+        for letter in ("A", "B", "C", "D"):
+            if wk(letter) in st.session_state:
+                opts[letter] = str(st.session_state[wk(letter)] or "")
+        q.options = opts
+        if wk("group") in st.session_state:
+            q.group_id = str(st.session_state[wk("group")] or "").strip()
+        if wk("render") in st.session_state:
+            q.render_mode = str(st.session_state[wk("render")] or q.render_mode)
+        if wk("layout") in st.session_state:
+            q.layout_style = str(st.session_state[wk("layout")] or q.layout_style)
+        if wk("include_image") in st.session_state:
+            q.include_image = bool(st.session_state[wk("include_image")])
+        if wk("visual") in st.session_state:
+            q.visual_mode = bool(st.session_state[wk("visual")])
+        if wk("reviewed") in st.session_state:
+            q.reviewed = bool(st.session_state[wk("reviewed")])
+
+
+
 def _build_annual_project_zip():
     """Create a single portable project ZIP containing all reusable state.
 
@@ -4758,6 +4841,7 @@ def _build_annual_project_zip():
     - source PDFs and annual source files when they were uploaded in v5.1+
     """
     buf = io.BytesIO()
+    _sync_live_editor_state_to_questions()
     questions = st.session_state.get("questions", [])
     _sync_group_widget_state_to_questions(questions)
     refdb = st.session_state.get("reference_db", _empty_reference_db(st.session_state.get("year", 115)))
@@ -5245,7 +5329,7 @@ with pc2:
         )
         st.caption(
             "最簡單的管理方式：每份題本固定一個專案名稱、固定一個 ZIP。"
-            "完成重要修改後重新下載並取代該題本舊備份即可。"
+            "v6.15.6 下載前會先同步目前畫面最新人工修改，避免專案備份落後一版。"
         )
     else:
         st.info("建立題庫後即可儲存完整年度專案。")
@@ -5349,7 +5433,7 @@ with setup_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.15.5 — hard reset only the annual reference layer.
+    # v6.15.6 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5444,7 +5528,7 @@ with setup_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.15.5: UPDATE semantics, not destructive rebuild semantics.
+        # v6.15.6: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
