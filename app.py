@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.14.2 原題頁優先顯示會考原題裁圖版"
+APP_VERSION = "Web v6.14.3 題組原題完整上下文顯示版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2674,7 +2674,7 @@ def _recover_by_question_bank(raw_sources, missing_numbers, question_bank):
 def _parse_publisher_files(files, expected_count=None, question_bank=None, debug_pub_name=None):
     """Parse one publisher's multiple files and select the best block PER QUESTION.
 
-    v6.14.2 hard rule:
+    v6.14.3 hard rule:
     A candidate that actually yields explanation text MUST ALWAYS beat a candidate
     that yields zero explanation text, regardless of DOCX/PPTX length.
 
@@ -2974,7 +2974,7 @@ def _publisher_orphan_explanation_index(refdb, pub):
     return out
 
 def _publisher_best_analysis(refdb, pub, qno):
-    # v6.14.2: every publisher uses the SAME display/read sanitization path.
+    # v6.14.3: every publisher uses the SAME display/read sanitization path.
     # This applies to 翰林／康軒／南一 alike, including old reference_db content.
     raw_block=(refdb.get("publisher",{}) or {}).get(pub,{}).get(str(qno),"")
     block=_sanitize_publisher_reference_for_display(raw_block, qno)
@@ -2991,7 +2991,7 @@ def _publisher_best_analysis(refdb, pub, qno):
 def _trim_publisher_cross_question_tail(block, current_q=None):
     """Remove a following question accidentally appended to the current publisher block.
 
-    v6.14.2:
+    v6.14.3:
     - storage side: trim before/after candidate selection
     - display side: same function can sanitize an already-written reference_db block
     - detects direct N+1 question starts even without [投影片xx]
@@ -3640,7 +3640,7 @@ def _render_evidence_block(title, evidence):
 
 def _render_question_review_editor(q, key_prefix="overview"):
 
-    # v6.14.2 transparent recommendation evidence fields
+    # v6.14.3 transparent recommendation evidence fields
     if isinstance(q, dict):
         st.markdown("**【建議詳解的撰寫依據】**")
         st.text_area("建議詳解的撰寫依據", value=str(q.get("建議詳解的撰寫依據", "") or ""), height=150, key=f"explain_basis_{q.get('question_no', q.get('題號', ''))}")
@@ -5175,7 +5175,7 @@ with ref_tab:
         "請先用 Word 另存成 .docx 再上傳。"
     )
 
-    # v6.14.2 — hard reset only the annual reference layer.
+    # v6.14.3 — hard reset only the annual reference layer.
     # It intentionally preserves question bank, selections, manual edits and ChatGPT JSON.
     if "_annual_ref_upload_generation" not in st.session_state:
         st.session_state["_annual_ref_upload_generation"] = 0
@@ -5270,7 +5270,7 @@ with ref_tab:
         disabled=not (hanlin_files or kang_files or nanyi_files or history_files),
         key="build_annual_ref"
     ):
-        # v6.14.2: UPDATE semantics, not destructive rebuild semantics.
+        # v6.14.3: UPDATE semantics, not destructive rebuild semantics.
         # Start from the currently loaded reference DB and replace only sources
         # actually uploaded in this run. This prevents testing 南一 from wiping
         # 翰林／康軒／歷年教師版.
@@ -6418,35 +6418,96 @@ with tab3:
                 else:
                     st.info("請先確認能力類型，才能列出歷年同題型教師版。")
             with ref_tabs[4]:
-                # v6.14.2：原題頁應優先呈現「會考原題裁圖」，而不是重組後的文字。
-                # 只有找不到 crop_png 時才退回文字版，避免使用者誤以為文字重排就是原題。
+                # v6.14.3：題組題的「原題」必須先呈現整個題組共用題幹／閱讀材料，
+                # 再呈現目前子題；不能只顯示 q.crop_png。
+                _gid = (q.group_id or "").strip()
+                _group_members = []
+                _group_crops = []
+                _group_intro_text = ""
+
+                if _gid:
+                    _group_members = sorted(
+                        [
+                            _x for _x in st.session_state.questions
+                            if (_x.group_id or "").strip() == _gid
+                        ],
+                        key=lambda _x: _x.source_no
+                    )
+
+                    for _x in _group_members:
+                        if getattr(_x, "group_crop_pngs", None):
+                            _group_crops = list(_x.group_crop_pngs or [])
+                            if _group_crops:
+                                break
+
+                    _intro_candidates = [
+                        (getattr(_x, "group_intro", "") or "").strip()
+                        for _x in _group_members
+                        if (getattr(_x, "group_intro", "") or "").strip()
+                    ]
+                    if not _intro_candidates:
+                        _intro_candidates = [
+                            (_x.material or "").strip()
+                            for _x in _group_members
+                            if (_x.material or "").strip()
+                        ]
+                    if _intro_candidates:
+                        _group_intro_text = max(_intro_candidates, key=len)
+
+                    _first_no = min([_x.source_no for _x in _group_members] or [q.source_no])
+                    _last_no = max([_x.source_no for _x in _group_members] or [q.source_no])
+
+                    st.markdown(
+                        f"### 題組共用題幹／閱讀材料｜原第 {_first_no}～{_last_no} 題"
+                    )
+
+                    if _group_crops:
+                        st.caption("以下先呈現原會考題本中的完整題組共用題幹／閱讀材料。")
+                        for _gi, _img in enumerate(_group_crops, 1):
+                            st.image(
+                                _img,
+                                caption=(
+                                    "題組共用題幹／閱讀材料"
+                                    if len(_group_crops) == 1
+                                    else f"題組共用題幹／閱讀材料 {_gi}"
+                                ),
+                                use_container_width=True
+                            )
+                    elif _group_intro_text:
+                        st.warning(
+                            "目前專案沒有保存題組共用題幹裁圖，先顯示程式辨識文字。"
+                            "若要看到原題完整版面，請確認載入的是含原 PDF 視覺素材的最新題本專案 ZIP。"
+                        )
+                        st.write(_group_intro_text)
+                    else:
+                        st.warning(
+                            "目前這個題組沒有可用的共用題幹裁圖或共用文字。"
+                            "請回題庫／考題總覽確認題組 ID 與原 PDF 視覺素材。"
+                        )
+
+                    st.markdown(f"### 本小題｜原第 {q.source_no} 題")
+
                 if q.crop_png:
                     st.image(
                         q.crop_png,
                         caption=f"原第 {q.source_no} 題｜會考原題裁圖",
                         use_container_width=True
                     )
-                    with st.expander("查看程式辨識文字（僅供核對）", expanded=False):
-                        if q.material.strip():
-                            st.markdown("**閱讀／共用材料**")
-                            st.write(q.material)
-                        st.markdown("**題幹**")
-                        st.write(q.text)
-                        for k, v in q.options.items():
-                            st.write(f"({k}) {v}")
-                        st.caption(
-                            f"官方答案：{q.answer or '—'}｜通過率："
-                            f"{q.pass_rate if q.pass_rate is not None else '—'}｜原頁：{q.page_no}"
-                        )
                 else:
                     st.warning(
-                        "目前這題沒有保存原題裁圖，因此暫時只能顯示程式辨識文字。"
+                        "目前這題沒有保存本小題原題裁圖，因此暫時只能顯示程式辨識文字。"
                         "若原專案曾有裁圖，請確認載入的是最新題本專案 ZIP。"
                     )
-                    if q.material.strip():
+
+                with st.expander("查看程式辨識文字（僅供核對）", expanded=False):
+                    if _gid and _group_intro_text:
+                        st.markdown("**題組共用題幹／閱讀材料**")
+                        st.write(_group_intro_text)
+                    elif q.material.strip():
                         st.markdown("**閱讀／共用材料**")
                         st.write(q.material)
-                    st.markdown("**題幹**")
+
+                    st.markdown("**本小題題幹**")
                     st.write(q.text)
                     for k, v in q.options.items():
                         st.write(f"({k}) {v}")
