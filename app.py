@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.5 通用舊專案相容修正版"
+APP_VERSION = "Web v6.16.6 安全更新分析內容版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -4566,6 +4566,144 @@ def _apply_batch_chatgpt_result(parsed_all, questions):
 
 
 # -----------------------------
+# v6.16.6 Safe analysis-only JSON update
+# -----------------------------
+_SAFE_ANALYSIS_FIELDS = (
+    "suggested_category",
+    "alternative_category",
+    "category_reason",
+    "synthesis_notes",
+    "lexical_verification",
+    "translation_basis",
+    "translation",
+    "explanation",
+    "teaching_focus",
+    "teaching",
+    "note_strategy",
+    "note_strategy_table_json",
+)
+
+def _snapshot_protected_question_fields(q):
+    """Snapshot fields that MUST NOT change during a safe analysis update."""
+    return {
+        "source_no": q.source_no,
+        "page_no": q.page_no,
+        "text": q.text,
+        "options": dict(q.options or {}),
+        "answer": q.answer,
+        "pass_rate": q.pass_rate,
+        "category": q.category,
+        "group_id": q.group_id,
+        "group_intro": q.group_intro,
+        "group_crop_pngs": list(q.group_crop_pngs or []),
+        "material": q.material,
+        "crop_png": q.crop_png,
+        "visual_mode": q.visual_mode,
+        "reviewed": q.reviewed,
+        "layout_style": q.layout_style,
+        "include_image": q.include_image,
+        "image_pngs": list(q.image_pngs or []),
+        "body_crop_png": q.body_crop_png,
+        "render_mode": q.render_mode,
+        "selected": q.selected,
+        "pre_visual_repair_text": q.pre_visual_repair_text,
+        "pre_visual_repair_options": dict(q.pre_visual_repair_options or {}),
+        "pre_visual_repair_material": q.pre_visual_repair_material,
+        "visual_repair_note": q.visual_repair_note,
+    }
+
+def _protected_snapshot_equal(a, b):
+    if a.keys() != b.keys():
+        return False
+    for k in a:
+        if a[k] != b[k]:
+            return False
+    return True
+
+def _safe_analysis_update_preview(parsed_all, questions):
+    """Return a human-readable preview. Does not mutate any question."""
+    by_no = {str(q.source_no): q for q in questions}
+    rows = []
+    for no, parsed in parsed_all.items():
+        q = by_no.get(str(no))
+        if q is None:
+            continue
+        changed = []
+        for field in _SAFE_ANALYSIS_FIELDS:
+            old = getattr(q, field, "")
+            new = parsed.get(field, "")
+            if (old or "") != (new or ""):
+                changed.append(field)
+        rows.append({
+            "題號": int(q.source_no),
+            "將更新欄位數": len(changed),
+            "將更新欄位": "、".join(changed) if changed else "無變更",
+        })
+    return rows
+
+def _apply_safe_analysis_update(parsed_all, questions):
+    """Apply ChatGPT JSON to analysis fields only.
+
+    Hard safety contract:
+    - NEVER changes selection, question text/options, official answer/pass rate,
+      final category, images/crops, reading-group data, review state or layout.
+    - Matches only by source_no/question_no.
+    - Verifies protected fields after the update and raises if any drift occurs.
+    """
+    by_no = {str(q.source_no): q for q in questions}
+    protected_before = {
+        str(q.source_no): _snapshot_protected_question_fields(q)
+        for q in questions
+    }
+
+    count = 0
+    updated_nos = []
+    for no, parsed in parsed_all.items():
+        q = by_no.get(str(no))
+        if q is None:
+            continue
+
+        # Whitelist only. Do not auto-fill q.category.
+        q.suggested_category = parsed.get("suggested_category", "")
+        q.alternative_category = parsed.get("alternative_category", "")
+        q.category_reason = parsed.get("category_reason", "")
+        q.synthesis_notes = parsed.get("synthesis_notes", "")
+        q.lexical_verification = parsed.get("lexical_verification", "")
+        q.translation_basis = parsed.get("translation_basis", "")
+        q.translation = parsed.get("translation", "")
+        q.explanation = parsed.get("explanation", "")
+        q.teaching_focus = parsed.get("teaching_focus", "")
+        q.teaching = parsed.get("teaching", "")
+        q.note_strategy = parsed.get("note_strategy", "")
+        q.note_strategy_table_json = parsed.get("note_strategy_table_json", "")
+        q.workbench_reviewed = True
+
+        # One-time widget sync so old Streamlit widget values cannot overwrite
+        # the newly imported analysis fields on rerun.
+        st.session_state[f"_chatgpt_sync_{q.source_no}"] = True
+
+        count += 1
+        updated_nos.append(q.source_no)
+
+    protected_after = {
+        str(q.source_no): _snapshot_protected_question_fields(q)
+        for q in questions
+    }
+    changed_protected = [
+        no for no in protected_before
+        if not _protected_snapshot_equal(protected_before[no], protected_after[no])
+    ]
+    if changed_protected:
+        raise RuntimeError(
+            "安全更新中止：偵測到非分析欄位異動，題號："
+            + "、".join(changed_protected)
+        )
+
+    return count, updated_nos
+
+
+
+# -----------------------------
 # v5.1 Annual project persistence
 # -----------------------------
 _PROJECT_WIDGET_KEYS = [
@@ -6327,7 +6465,8 @@ with edit_tab:
             st.markdown("#### 步驟 2｜把 ChatGPT 回傳的 JSON 檔上傳回來")
             st.caption(
                 "ChatGPT 完成後，下載它提供的 .json 檔，再直接上傳到這裡。"
-                "程式會自動預檢題數、能力類型建議與五個內容欄位，不需要打開 JSON，也不用複製貼上。"
+                "v6.16.6 採「安全更新」：只更新建議能力類型、三家比較、字詞查證、語譯、詳解、教學重點、教學步驟與筆記；"
+                "不會修改選題、題幹、選項、官方答案、通過率、最終能力類型、題組、圖片或版面設定。"
             )
             result_json_file = st.file_uploader(
                 "上傳 ChatGPT 完成稿 JSON",
@@ -6335,6 +6474,18 @@ with edit_tab:
                 key="batch_chatgpt_json_upload",
                 help="請上傳 ChatGPT 依本次分析包產生的 JSON 完成稿。"
             )
+
+            # v6.16.6: always offer a one-click rollback point before applying JSON.
+            if st.session_state.questions:
+                st.download_button(
+                    "🛡️ 先下載「更新前」專案備份 ZIP",
+                    data=_build_annual_project_zip(),
+                    file_name=f"{int(st.session_state.year)}_套用JSON前_專案備份.zip",
+                    mime="application/zip",
+                    key="download_pre_safe_json_backup",
+                    use_container_width=True,
+                    help="建議第一次使用安全更新時先下載。這份 ZIP 保留目前選題、圖片與全部內容，可隨時復原。"
+                )
 
             uploaded_json_text = ""
             if result_json_file is not None:
@@ -6378,17 +6529,33 @@ with edit_tab:
                         for err in preview_errors:
                             st.write("• " + err)
 
+                safe_preview_rows = _safe_analysis_update_preview(preview_parsed, batch_questions)
+                if safe_preview_rows:
+                    with st.expander("🛡️ 安全更新預覽｜查看每題會更新哪些分析欄位", expanded=False):
+                        st.dataframe(safe_preview_rows, use_container_width=True, hide_index=True)
+                        st.success(
+                            "保護欄位：選題狀態、題幹、選項、官方答案、通過率、最終能力類型、"
+                            "題組資料、原題圖片、版面設定與校對狀態都不會被這次 JSON 改動。"
+                        )
+
             def _import_batch_chatgpt_callback():
                 parsed_all, errors = _parse_batch_chatgpt_result(
                     st.session_state.get("batch_chatgpt_result", ""), batch_questions
                 )
-                st.session_state["batch_import_count"] = _apply_batch_chatgpt_result(
-                    parsed_all, batch_questions
-                )
-                st.session_state["batch_import_errors"] = errors
+                try:
+                    count, updated_nos = _apply_safe_analysis_update(
+                        parsed_all, batch_questions
+                    )
+                    st.session_state["batch_import_count"] = count
+                    st.session_state["batch_import_updated_nos"] = updated_nos
+                    st.session_state["batch_import_errors"] = errors
+                except Exception as e:
+                    st.session_state["batch_import_count"] = 0
+                    st.session_state["batch_import_updated_nos"] = []
+                    st.session_state["batch_import_errors"] = errors + [str(e)]
 
             st.button(
-                "步驟 4｜⬇️ 匯入已成功辨識的全部題目",
+                "步驟 4｜🛡️ 安全更新已辨識題目的分析內容",
                 key="import_batch_chatgpt_result",
                 on_click=_import_batch_chatgpt_callback,
                 type="primary",
@@ -6400,8 +6567,18 @@ with edit_tab:
                 count = st.session_state.pop("batch_import_count")
                 errs = st.session_state.pop("batch_import_errors", [])
                 if count:
-                    st.success(f"已成功匯入 {count} 題。接下來直接往下逐題檢查與微調，不需要再貼任何 ChatGPT 內容。")
-                    st.info("下一步：逐題確認【三家比較筆記】【字詞查證紀錄】；文言文題再確認【語譯撰寫依據】【建議語譯】；並校對【建議詳解】【教學重點】【建議教學步驟】【筆記策略】；若某一題真的需要重做，再展開該題的「進階／單題重做」。")
+                    updated_nos = st.session_state.pop("batch_import_updated_nos", [])
+                    st.success(
+                        f"安全更新完成：已更新 {count} 題分析內容"
+                        + (f"（第{'、'.join(str(x) for x in updated_nos)}題）" if updated_nos else "")
+                        + "。"
+                    )
+                    st.info(
+                        "已完成保護檢查：選題、題幹、選項、答案、通過率、最終能力類型、題組、圖片與版面設定均未修改。"
+                        "接下來可直接往下逐題校對【詳解】【教學重點】【教學步驟】【筆記策略】。"
+                    )
+                if not count:
+                    st.session_state.pop("batch_import_updated_nos", None)
                 if errs:
                     st.warning("；".join(errs))
             st.divider()
