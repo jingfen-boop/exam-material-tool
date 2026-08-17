@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.9 出版社切題修正版"
+APP_VERSION = "Web v6.16.10 出版社Word切題根因修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2450,6 +2450,86 @@ def _split_slides_by_question(text: str, expected_count=None):
                 pending_shared.append(normalized)
 
     return {k: v.strip() for k, v in out.items() if v.strip()}
+
+
+
+def _split_text_by_question(text: str, expected_count=None):
+    """Split publisher DOCX/PDF/TXT by real question starts.
+
+    v6.16.10 root-cause fix:
+    _parse_publisher_files() already calls this function, but the function was
+    missing in the current code.  The exception was silently caught, so DOCX
+    sources fell back to generic numbered-list recovery.  That can mistake
+    textbook references such as "2.翰版..." for question numbers.
+
+    Priority:
+    1) answer-bearing starts: ( B ) 1. / （A）2.
+    2) explicit 第N題
+    3) conservative generic fallback with multiple-choice evidence.
+    """
+    s = _normalize_reference_text(text or "")
+    if not s:
+        return {}
+
+    max_q = int(expected_count or 99)
+
+    # Accept normal spaces, tabs, and full-width ideographic spaces inside
+    # answer parentheses.  Do NOT use \s here because it can cross newlines.
+    answer_start_re = re.compile(
+        r"(?m)^[ \t\u3000]*[（(][ \t\u3000]*[A-DＡ-Ｄ][ \t\u3000]*[）)]"
+        r"[ \t\u3000]*(?P<q>\d{1,2})[ \t\u3000]*[.．、][ \t\u3000]*"
+    )
+    starts = [
+        (int(m.group("q")), m.start())
+        for m in answer_start_re.finditer(s)
+        if 1 <= int(m.group("q")) <= max_q
+    ]
+
+    if not starts:
+        explicit_re = re.compile(
+            r"(?m)^[ \t\u3000]*第[ \t\u3000]*(?P<q>\d{1,2})"
+            r"[ \t\u3000]*題[ \t\u3000]*[:：.．、]?"
+        )
+        starts = [
+            (int(m.group("q")), m.start())
+            for m in explicit_re.finditer(s)
+            if 1 <= int(m.group("q")) <= max_q
+        ]
+
+    if not starts:
+        generic = _question_anchor_candidates(s, expected_count)
+        filtered = []
+        for qno, p in generic:
+            local = s[p:p+800]
+            option_hits = sum(
+                tok in local
+                for tok in ("(A)", "(B)", "(C)", "(D)", "（A）", "（B）", "（C）", "（D）")
+            )
+            if option_hits >= 2:
+                filtered.append((qno, p))
+        starts = filtered
+
+    if not starts:
+        return {}
+
+    clean = []
+    seen = set()
+    for qno, p in sorted(starts, key=lambda x: x[1]):
+        key = (qno, p)
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append((qno, p))
+
+    out = {}
+    for i, (qno, p) in enumerate(clean):
+        end = clean[i+1][1] if i+1 < len(clean) else len(s)
+        block = s[p:end].strip()
+        if len(block) >= 20:
+            old = out.get(str(qno), "")
+            if len(_norm_cmp_text(block)) > len(_norm_cmp_text(old)):
+                out[str(qno)] = block
+    return out
 
 
 def _question_anchor_candidates(text: str, expected_count=None):
