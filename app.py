@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.6 安全更新分析內容版"
+APP_VERSION = "Web v6.16.7 出版社詳解辨識修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -3069,19 +3069,40 @@ def _publisher_analysis_candidate(block: str):
         return "", "none", 0.0
 
     # 1) Explicit explanation headings: strongest and safest.
+    # v6.16.7 minimal fix:
+    # Publisher DOC/DOCX/PPT extraction does not always preserve a newline before
+    # 「試題解析／詳解」.  Hanlin q1 and Kangxuan q1 are real examples:
+    #   ...【即可】 試題解析：(A)當下...
+    #   ...可以刪去法推得答案 詳解 (A)立刻...
+    # The old parser required ^ or \n before the heading, so these valid
+    # explanations could be shown as "未辨識".
+    #
+    # We now accept an inline heading only when it is a standalone label boundary,
+    # while still requiring one of the explicit publisher labels below.
     markers = ("試題解析", "詳解", "解析", "解答說明", "解題")
     found = []
     for marker in markers:
         m = re.search(
-            rf"(?:^|\n)\s*【?\s*{re.escape(marker)}\s*】?\s*[：:]?\s*",
-            src,
-            flags=re.M
+            rf"(?<![\u4e00-\u9fffA-Za-z0-9])"
+            rf"(?:【\s*)?{re.escape(marker)}(?:\s*】)?\s*[：:]?\s*",
+            src
         )
+        if not m:
+            # Start-of-string fallback because the negative lookbehind cannot
+            # match before position 0 in every regex layout.
+            m = re.search(
+                rf"^(?:【\s*)?{re.escape(marker)}(?:\s*】)?\s*[：:]?\s*",
+                src
+            )
         if m:
             found.append((m.start(), m.end(), marker))
     if found:
         _, content_start, marker = min(found, key=lambda x: x[0])
-        return src[content_start:].strip(), f"heading:{marker}", 1.0
+        analysis = src[content_start:].strip()
+        # Keep the same safety boundary used everywhere else: do not let the
+        # next question leak into the current publisher explanation.
+        analysis = _trim_publisher_cross_question_tail(analysis, None)
+        return analysis, f"heading:{marker}", 1.0
 
     # 2) Markerless publisher format. Work line-by-line and locate a plausible
     #    transition after question/options/answer/material reference.
@@ -3172,6 +3193,18 @@ def _publisher_analysis_candidate(block: str):
     confidence = 0.72 + min(0.20, cue_hits * 0.04)
     return analysis, "heuristic-markerless", confidence
 
+
+
+def _publisher_analysis_diagnostic(block: str, current_q=None):
+    """Read-only diagnostic for publisher explanation extraction."""
+    safe_block = _sanitize_publisher_reference_for_display(block, current_q)
+    analysis, method, confidence = _publisher_analysis_candidate(safe_block)
+    return {
+        "method": method,
+        "confidence": confidence,
+        "analysis_chars": len((analysis or "").strip()),
+        "has_analysis": bool((analysis or "").strip()),
+    }
 
 def _publisher_analysis_only(block: str, current_q=None) -> str:
     block = _sanitize_publisher_reference_for_display(block, current_q)
