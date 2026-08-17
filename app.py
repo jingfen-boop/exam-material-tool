@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.10 出版社Word切題根因修正版"
+APP_VERSION = "Web v6.16.11 出版社詳解最終顯示修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -3122,15 +3122,36 @@ def _trim_publisher_cross_question_tail(block, current_q=None):
 
             # Direct next-question patterns, deliberately allowing no blank line and
             # forms such as "36.右表..." / "（C）36." / "第36題".
-            pats = [
-                rf'(?m)^[ \t]*[（(]?[A-DＡ-Ｄ]?[）)]?[ \t]*{nq}[ \t]*[\.．、][ \t]*\S+',
-                rf'(?m)^[ \t]*第[ \t]*{nq}[ \t]*題[ \t]*[:：]?[ \t]*\S*',
+            # v6.16.11 final boundary fix:
+            # Numbered textbook references inside 「對應教材」 (e.g. "2.翰版...")
+            # are NOT next-question boundaries.
+            strong_pats = [
+                rf'(?m)^[ \t\u3000]*[（(][ \t\u3000]*[A-DＡ-Ｄ][ \t\u3000]*[）)]'
+                rf'[ \t\u3000]*{nq}[ \t\u3000]*[\.．、][ \t\u3000]*\S+',
+                rf'(?m)^[ \t\u3000]*第[ \t\u3000]*{nq}[ \t\u3000]*題'
+                rf'[ \t\u3000]*[:：]?[ \t\u3000]*\S*',
             ]
             hits = []
-            for p in pats:
+            for p in strong_pats:
                 m = re.search(p, s)
                 if m and m.start() > 20:
                     hits.append(m)
+
+            # Legacy bare-number fallback: accept only when the nearby text
+            # genuinely looks like a question (question mark + >=2 options).
+            bare = re.search(
+                rf'(?m)^[ \t\u3000]*{nq}[ \t\u3000]*[\.．、][ \t\u3000]*\S+',
+                s
+            )
+            if bare and bare.start() > 20:
+                local = s[bare.start():bare.start()+900]
+                option_hits = sum(
+                    tok in local
+                    for tok in ("(A)", "(B)", "(C)", "(D)",
+                                "（A）", "（B）", "（C）", "（D）")
+                )
+                if ("？" in local or "?" in local) and option_hits >= 2:
+                    hits.append(bare)
 
             if hits:
                 m = min(hits, key=lambda x: x.start())
@@ -3251,6 +3272,27 @@ def _publisher_analysis_candidate(block: str):
         if is_questionish(line) or is_answer_only(line) or is_material_ref(line):
             score -= 3
         return score
+
+    # v6.16.11 Kangxuan legacy compact-analysis fix:
+    # Existing project data can contain:
+    #   [教材參考行]
+    #   (A)立刻　(C)(D)便、就
+    # The second line is clearly an option-by-option explanation, but the generic
+    # scoring subtracts points because it begins with "(A)".  Detect this narrow
+    # publisher pattern BEFORE generic scoring.
+    for i, line in enumerate(lines):
+        if is_material_ref(line) or any(
+            cue in line for cue in ("刪去法推得答案", "可用刪去法", "可以刪去法")
+        ):
+            for j in range(i + 1, min(len(lines), i + 4)):
+                nxt = lines[j]
+                option_labels = re.findall(r"[（(][A-DＡ-Ｄ][）)]", nxt)
+                if (
+                    len(option_labels) >= 2
+                    and len(nxt) <= 220
+                    and "？" not in nxt and "?" not in nxt
+                ):
+                    return nxt.strip(), "heuristic-markerless", 0.88
 
     # The explanation usually starts after an answer-only line or a textbook ref.
     candidate_starts = []
