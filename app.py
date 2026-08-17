@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.8 安全更新同步修正版"
+APP_VERSION = "Web v6.16.9 出版社切題修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -2780,6 +2780,34 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None, debug
                 if block:
                     candidates.setdefault(str(q), []).append(
                         _candidate_record(block, "內容比對復原")
+                    )
+
+        # v6.16.9 minimal publisher-boundary repair:
+        # A question can already be present in candidates but still be incomplete.
+        # Example verified with the user's Hanlin q1:
+        # the number-based splitter keeps the stem/教材 under q1, but moves the real
+        # 「試題解析：(A)當下……」 into another numbered block because numbers inside
+        # 「對應教材」 are mistaken for question numbers.
+        #
+        # Run the existing official-question content matcher for ALL questions as
+        # an additional candidate source.  It never overwrites directly; the
+        # existing candidate ranking still decides the winner, and its HARD first
+        # priority is "has_explanation".  Thus a complete content-matched q1 beats
+        # an incomplete number-split q1, while already-correct questions remain
+        # governed by the same ranking rules.
+        if question_bank:
+            all_qnos = [
+                int(q.source_no) for q in question_bank
+                if 1 <= int(q.source_no) <= int(expected_count or 999)
+            ]
+            content_recovered = _recover_by_question_bank(
+                raw_sources, all_qnos, question_bank
+            )
+            for q, block in content_recovered.items():
+                block = _trim_publisher_cross_question_tail((block or "").strip(), q)
+                if block:
+                    candidates.setdefault(str(q), []).append(
+                        _candidate_record(block, "官方題幹內容比對")
                     )
 
     combined = {}
