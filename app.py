@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.7 出版社詳解辨識修正版"
+APP_VERSION = "Web v6.16.8 安全更新同步修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -4948,6 +4948,25 @@ def _sync_live_editor_state_to_questions():
     for q in questions:
         no = q.source_no
 
+        # v6.16.8 critical safety fix:
+        # After a ChatGPT JSON safe-update, the Question model already contains
+        # the NEW analysis, but the old Streamlit text-area values may still be
+        # present in session_state until the workbench is rendered again.
+        #
+        # _build_annual_project_zip() is rendered near the top of the page and
+        # calls this function BEFORE the workbench gets a chance to consume
+        # _chatgpt_sync_{no}.  In v6.16.6/7 this could therefore copy OLD widget
+        # text back into the Question object immediately after a successful JSON
+        # update, making the screen appear to "revert".
+        #
+        # While a one-time ChatGPT sync is pending, the model is authoritative:
+        # do NOT copy formal analysis widgets back into it.  We deliberately do
+        # not pop the flag here; the workbench later consumes it and refreshes
+        # all visible widgets from the new model values.
+        pending_chatgpt_sync = bool(
+            st.session_state.get(f"_chatgpt_sync_{no}", False)
+        )
+
         # Formal content editor fields
         mapping = {
             f"trans_{no}": "translation",
@@ -4959,9 +4978,10 @@ def _sync_live_editor_state_to_questions():
             f"note_{no}": "note_strategy",
             f"note_table_{no}": "note_strategy_table_json",
         }
-        for key, attr in mapping.items():
-            if key in st.session_state:
-                setattr(q, attr, st.session_state.get(key, ""))
+        if not pending_chatgpt_sync:
+            for key, attr in mapping.items():
+                if key in st.session_state:
+                    setattr(q, attr, st.session_state.get(key, ""))
 
         # Review / visual output flags
         for key in (f"wb_reviewed_{no}", f"side_wb_reviewed_{no}"):
@@ -6608,6 +6628,7 @@ with edit_tab:
                     )
                     st.info(
                         "已完成保護檢查：選題、題幹、選項、答案、通過率、最終能力類型、題組、圖片與版面設定均未修改。"
+                        "v6.16.8 會在本次 rerun 期間保護新版分析內容，避免舊文字框狀態把它覆寫回去。"
                         "接下來可直接往下逐題校對【詳解】【教學重點】【教學步驟】【筆記策略】。"
                     )
                 if not count:
