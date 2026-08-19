@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.16.11 出版社詳解最終顯示修正版"
+APP_VERSION = "Web v6.17.0 115正式學生／教師版範本整合版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -1832,7 +1832,7 @@ def _template_path(kind: str, teacher: bool) -> Path:
     return base / mapping[(kind, teacher)]
 
 def _load_clean_template(kind: str, teacher: bool, year: int, count: int, booklet_no: str = ""):
-    """Load the user's real sample Word and retain its page/style/header area through 壹、單題."""
+    """Load the user-provided 115 final Word sample and retain its page/style/header area through 壹、單題."""
     path = _template_path(kind, teacher)
     if not path.exists():
         return None
@@ -1928,6 +1928,19 @@ def _add_exam_section_heading(doc, text):
     r = p.add_run(text)
     _set_run_word_style(r, font="標楷體", size=13, bold=True)
     return p
+
+
+def _formal_booklet_filename(year: int, template_kind: str, booklet_no: str, teacher: bool) -> str:
+    """Filename matching the user's 115 final student/teacher booklet convention."""
+    if template_kind == "八成以上":
+        label = "通過率達八成以上"
+    elif template_kind == "六成至七成":
+        label = "通過率達六成至七成"
+    else:
+        return ""
+    no = (booklet_no or "").strip() or "自動"
+    tail = "(詳解_教學法)" if teacher else ""
+    return f"{year}年會考國文題本-{label}-題本{no}{tail}.docx"
 
 
 def make_editable_exam_layout_docx(questions: List[Question], year: int, title_suffix: str,
@@ -2452,86 +2465,6 @@ def _split_slides_by_question(text: str, expected_count=None):
     return {k: v.strip() for k, v in out.items() if v.strip()}
 
 
-
-def _split_text_by_question(text: str, expected_count=None):
-    """Split publisher DOCX/PDF/TXT by real question starts.
-
-    v6.16.10 root-cause fix:
-    _parse_publisher_files() already calls this function, but the function was
-    missing in the current code.  The exception was silently caught, so DOCX
-    sources fell back to generic numbered-list recovery.  That can mistake
-    textbook references such as "2.翰版..." for question numbers.
-
-    Priority:
-    1) answer-bearing starts: ( B ) 1. / （A）2.
-    2) explicit 第N題
-    3) conservative generic fallback with multiple-choice evidence.
-    """
-    s = _normalize_reference_text(text or "")
-    if not s:
-        return {}
-
-    max_q = int(expected_count or 99)
-
-    # Accept normal spaces, tabs, and full-width ideographic spaces inside
-    # answer parentheses.  Do NOT use \s here because it can cross newlines.
-    answer_start_re = re.compile(
-        r"(?m)^[ \t\u3000]*[（(][ \t\u3000]*[A-DＡ-Ｄ][ \t\u3000]*[）)]"
-        r"[ \t\u3000]*(?P<q>\d{1,2})[ \t\u3000]*[.．、][ \t\u3000]*"
-    )
-    starts = [
-        (int(m.group("q")), m.start())
-        for m in answer_start_re.finditer(s)
-        if 1 <= int(m.group("q")) <= max_q
-    ]
-
-    if not starts:
-        explicit_re = re.compile(
-            r"(?m)^[ \t\u3000]*第[ \t\u3000]*(?P<q>\d{1,2})"
-            r"[ \t\u3000]*題[ \t\u3000]*[:：.．、]?"
-        )
-        starts = [
-            (int(m.group("q")), m.start())
-            for m in explicit_re.finditer(s)
-            if 1 <= int(m.group("q")) <= max_q
-        ]
-
-    if not starts:
-        generic = _question_anchor_candidates(s, expected_count)
-        filtered = []
-        for qno, p in generic:
-            local = s[p:p+800]
-            option_hits = sum(
-                tok in local
-                for tok in ("(A)", "(B)", "(C)", "(D)", "（A）", "（B）", "（C）", "（D）")
-            )
-            if option_hits >= 2:
-                filtered.append((qno, p))
-        starts = filtered
-
-    if not starts:
-        return {}
-
-    clean = []
-    seen = set()
-    for qno, p in sorted(starts, key=lambda x: x[1]):
-        key = (qno, p)
-        if key in seen:
-            continue
-        seen.add(key)
-        clean.append((qno, p))
-
-    out = {}
-    for i, (qno, p) in enumerate(clean):
-        end = clean[i+1][1] if i+1 < len(clean) else len(s)
-        block = s[p:end].strip()
-        if len(block) >= 20:
-            old = out.get(str(qno), "")
-            if len(_norm_cmp_text(block)) > len(_norm_cmp_text(old)):
-                out[str(qno)] = block
-    return out
-
-
 def _question_anchor_candidates(text: str, expected_count=None):
     """找出出版社文件中的可能題號位置。
 
@@ -2862,34 +2795,6 @@ def _parse_publisher_files(files, expected_count=None, question_bank=None, debug
                         _candidate_record(block, "內容比對復原")
                     )
 
-        # v6.16.9 minimal publisher-boundary repair:
-        # A question can already be present in candidates but still be incomplete.
-        # Example verified with the user's Hanlin q1:
-        # the number-based splitter keeps the stem/教材 under q1, but moves the real
-        # 「試題解析：(A)當下……」 into another numbered block because numbers inside
-        # 「對應教材」 are mistaken for question numbers.
-        #
-        # Run the existing official-question content matcher for ALL questions as
-        # an additional candidate source.  It never overwrites directly; the
-        # existing candidate ranking still decides the winner, and its HARD first
-        # priority is "has_explanation".  Thus a complete content-matched q1 beats
-        # an incomplete number-split q1, while already-correct questions remain
-        # governed by the same ranking rules.
-        if question_bank:
-            all_qnos = [
-                int(q.source_no) for q in question_bank
-                if 1 <= int(q.source_no) <= int(expected_count or 999)
-            ]
-            content_recovered = _recover_by_question_bank(
-                raw_sources, all_qnos, question_bank
-            )
-            for q, block in content_recovered.items():
-                block = _trim_publisher_cross_question_tail((block or "").strip(), q)
-                if block:
-                    candidates.setdefault(str(q), []).append(
-                        _candidate_record(block, "官方題幹內容比對")
-                    )
-
     combined = {}
     merge_debug = {}
 
@@ -3122,36 +3027,15 @@ def _trim_publisher_cross_question_tail(block, current_q=None):
 
             # Direct next-question patterns, deliberately allowing no blank line and
             # forms such as "36.右表..." / "（C）36." / "第36題".
-            # v6.16.11 final boundary fix:
-            # Numbered textbook references inside 「對應教材」 (e.g. "2.翰版...")
-            # are NOT next-question boundaries.
-            strong_pats = [
-                rf'(?m)^[ \t\u3000]*[（(][ \t\u3000]*[A-DＡ-Ｄ][ \t\u3000]*[）)]'
-                rf'[ \t\u3000]*{nq}[ \t\u3000]*[\.．、][ \t\u3000]*\S+',
-                rf'(?m)^[ \t\u3000]*第[ \t\u3000]*{nq}[ \t\u3000]*題'
-                rf'[ \t\u3000]*[:：]?[ \t\u3000]*\S*',
+            pats = [
+                rf'(?m)^[ \t]*[（(]?[A-DＡ-Ｄ]?[）)]?[ \t]*{nq}[ \t]*[\.．、][ \t]*\S+',
+                rf'(?m)^[ \t]*第[ \t]*{nq}[ \t]*題[ \t]*[:：]?[ \t]*\S*',
             ]
             hits = []
-            for p in strong_pats:
+            for p in pats:
                 m = re.search(p, s)
                 if m and m.start() > 20:
                     hits.append(m)
-
-            # Legacy bare-number fallback: accept only when the nearby text
-            # genuinely looks like a question (question mark + >=2 options).
-            bare = re.search(
-                rf'(?m)^[ \t\u3000]*{nq}[ \t\u3000]*[\.．、][ \t\u3000]*\S+',
-                s
-            )
-            if bare and bare.start() > 20:
-                local = s[bare.start():bare.start()+900]
-                option_hits = sum(
-                    tok in local
-                    for tok in ("(A)", "(B)", "(C)", "(D)",
-                                "（A）", "（B）", "（C）", "（D）")
-                )
-                if ("？" in local or "?" in local) and option_hits >= 2:
-                    hits.append(bare)
 
             if hits:
                 m = min(hits, key=lambda x: x.start())
@@ -3198,40 +3082,19 @@ def _publisher_analysis_candidate(block: str):
         return "", "none", 0.0
 
     # 1) Explicit explanation headings: strongest and safest.
-    # v6.16.7 minimal fix:
-    # Publisher DOC/DOCX/PPT extraction does not always preserve a newline before
-    # 「試題解析／詳解」.  Hanlin q1 and Kangxuan q1 are real examples:
-    #   ...【即可】 試題解析：(A)當下...
-    #   ...可以刪去法推得答案 詳解 (A)立刻...
-    # The old parser required ^ or \n before the heading, so these valid
-    # explanations could be shown as "未辨識".
-    #
-    # We now accept an inline heading only when it is a standalone label boundary,
-    # while still requiring one of the explicit publisher labels below.
     markers = ("試題解析", "詳解", "解析", "解答說明", "解題")
     found = []
     for marker in markers:
         m = re.search(
-            rf"(?<![\u4e00-\u9fffA-Za-z0-9])"
-            rf"(?:【\s*)?{re.escape(marker)}(?:\s*】)?\s*[：:]?\s*",
-            src
+            rf"(?:^|\n)\s*【?\s*{re.escape(marker)}\s*】?\s*[：:]?\s*",
+            src,
+            flags=re.M
         )
-        if not m:
-            # Start-of-string fallback because the negative lookbehind cannot
-            # match before position 0 in every regex layout.
-            m = re.search(
-                rf"^(?:【\s*)?{re.escape(marker)}(?:\s*】)?\s*[：:]?\s*",
-                src
-            )
         if m:
             found.append((m.start(), m.end(), marker))
     if found:
         _, content_start, marker = min(found, key=lambda x: x[0])
-        analysis = src[content_start:].strip()
-        # Keep the same safety boundary used everywhere else: do not let the
-        # next question leak into the current publisher explanation.
-        analysis = _trim_publisher_cross_question_tail(analysis, None)
-        return analysis, f"heading:{marker}", 1.0
+        return src[content_start:].strip(), f"heading:{marker}", 1.0
 
     # 2) Markerless publisher format. Work line-by-line and locate a plausible
     #    transition after question/options/answer/material reference.
@@ -3272,27 +3135,6 @@ def _publisher_analysis_candidate(block: str):
         if is_questionish(line) or is_answer_only(line) or is_material_ref(line):
             score -= 3
         return score
-
-    # v6.16.11 Kangxuan legacy compact-analysis fix:
-    # Existing project data can contain:
-    #   [教材參考行]
-    #   (A)立刻　(C)(D)便、就
-    # The second line is clearly an option-by-option explanation, but the generic
-    # scoring subtracts points because it begins with "(A)".  Detect this narrow
-    # publisher pattern BEFORE generic scoring.
-    for i, line in enumerate(lines):
-        if is_material_ref(line) or any(
-            cue in line for cue in ("刪去法推得答案", "可用刪去法", "可以刪去法")
-        ):
-            for j in range(i + 1, min(len(lines), i + 4)):
-                nxt = lines[j]
-                option_labels = re.findall(r"[（(][A-DＡ-Ｄ][）)]", nxt)
-                if (
-                    len(option_labels) >= 2
-                    and len(nxt) <= 220
-                    and "？" not in nxt and "?" not in nxt
-                ):
-                    return nxt.strip(), "heuristic-markerless", 0.88
 
     # The explanation usually starts after an answer-only line or a textbook ref.
     candidate_starts = []
@@ -3343,18 +3185,6 @@ def _publisher_analysis_candidate(block: str):
     confidence = 0.72 + min(0.20, cue_hits * 0.04)
     return analysis, "heuristic-markerless", confidence
 
-
-
-def _publisher_analysis_diagnostic(block: str, current_q=None):
-    """Read-only diagnostic for publisher explanation extraction."""
-    safe_block = _sanitize_publisher_reference_for_display(block, current_q)
-    analysis, method, confidence = _publisher_analysis_candidate(safe_block)
-    return {
-        "method": method,
-        "confidence": confidence,
-        "analysis_chars": len((analysis or "").strip()),
-        "has_analysis": bool((analysis or "").strip()),
-    }
 
 def _publisher_analysis_only(block: str, current_q=None) -> str:
     block = _sanitize_publisher_reference_for_display(block, current_q)
@@ -4749,144 +4579,6 @@ def _apply_batch_chatgpt_result(parsed_all, questions):
 
 
 # -----------------------------
-# v6.16.6 Safe analysis-only JSON update
-# -----------------------------
-_SAFE_ANALYSIS_FIELDS = (
-    "suggested_category",
-    "alternative_category",
-    "category_reason",
-    "synthesis_notes",
-    "lexical_verification",
-    "translation_basis",
-    "translation",
-    "explanation",
-    "teaching_focus",
-    "teaching",
-    "note_strategy",
-    "note_strategy_table_json",
-)
-
-def _snapshot_protected_question_fields(q):
-    """Snapshot fields that MUST NOT change during a safe analysis update."""
-    return {
-        "source_no": q.source_no,
-        "page_no": q.page_no,
-        "text": q.text,
-        "options": dict(q.options or {}),
-        "answer": q.answer,
-        "pass_rate": q.pass_rate,
-        "category": q.category,
-        "group_id": q.group_id,
-        "group_intro": q.group_intro,
-        "group_crop_pngs": list(q.group_crop_pngs or []),
-        "material": q.material,
-        "crop_png": q.crop_png,
-        "visual_mode": q.visual_mode,
-        "reviewed": q.reviewed,
-        "layout_style": q.layout_style,
-        "include_image": q.include_image,
-        "image_pngs": list(q.image_pngs or []),
-        "body_crop_png": q.body_crop_png,
-        "render_mode": q.render_mode,
-        "selected": q.selected,
-        "pre_visual_repair_text": q.pre_visual_repair_text,
-        "pre_visual_repair_options": dict(q.pre_visual_repair_options or {}),
-        "pre_visual_repair_material": q.pre_visual_repair_material,
-        "visual_repair_note": q.visual_repair_note,
-    }
-
-def _protected_snapshot_equal(a, b):
-    if a.keys() != b.keys():
-        return False
-    for k in a:
-        if a[k] != b[k]:
-            return False
-    return True
-
-def _safe_analysis_update_preview(parsed_all, questions):
-    """Return a human-readable preview. Does not mutate any question."""
-    by_no = {str(q.source_no): q for q in questions}
-    rows = []
-    for no, parsed in parsed_all.items():
-        q = by_no.get(str(no))
-        if q is None:
-            continue
-        changed = []
-        for field in _SAFE_ANALYSIS_FIELDS:
-            old = getattr(q, field, "")
-            new = parsed.get(field, "")
-            if (old or "") != (new or ""):
-                changed.append(field)
-        rows.append({
-            "題號": int(q.source_no),
-            "將更新欄位數": len(changed),
-            "將更新欄位": "、".join(changed) if changed else "無變更",
-        })
-    return rows
-
-def _apply_safe_analysis_update(parsed_all, questions):
-    """Apply ChatGPT JSON to analysis fields only.
-
-    Hard safety contract:
-    - NEVER changes selection, question text/options, official answer/pass rate,
-      final category, images/crops, reading-group data, review state or layout.
-    - Matches only by source_no/question_no.
-    - Verifies protected fields after the update and raises if any drift occurs.
-    """
-    by_no = {str(q.source_no): q for q in questions}
-    protected_before = {
-        str(q.source_no): _snapshot_protected_question_fields(q)
-        for q in questions
-    }
-
-    count = 0
-    updated_nos = []
-    for no, parsed in parsed_all.items():
-        q = by_no.get(str(no))
-        if q is None:
-            continue
-
-        # Whitelist only. Do not auto-fill q.category.
-        q.suggested_category = parsed.get("suggested_category", "")
-        q.alternative_category = parsed.get("alternative_category", "")
-        q.category_reason = parsed.get("category_reason", "")
-        q.synthesis_notes = parsed.get("synthesis_notes", "")
-        q.lexical_verification = parsed.get("lexical_verification", "")
-        q.translation_basis = parsed.get("translation_basis", "")
-        q.translation = parsed.get("translation", "")
-        q.explanation = parsed.get("explanation", "")
-        q.teaching_focus = parsed.get("teaching_focus", "")
-        q.teaching = parsed.get("teaching", "")
-        q.note_strategy = parsed.get("note_strategy", "")
-        q.note_strategy_table_json = parsed.get("note_strategy_table_json", "")
-        q.workbench_reviewed = True
-
-        # One-time widget sync so old Streamlit widget values cannot overwrite
-        # the newly imported analysis fields on rerun.
-        st.session_state[f"_chatgpt_sync_{q.source_no}"] = True
-
-        count += 1
-        updated_nos.append(q.source_no)
-
-    protected_after = {
-        str(q.source_no): _snapshot_protected_question_fields(q)
-        for q in questions
-    }
-    changed_protected = [
-        no for no in protected_before
-        if not _protected_snapshot_equal(protected_before[no], protected_after[no])
-    ]
-    if changed_protected:
-        raise RuntimeError(
-            "安全更新中止：偵測到非分析欄位異動，題號："
-            + "、".join(changed_protected)
-        )
-
-    return count, updated_nos
-
-
-
-# -----------------------------
 # v5.1 Annual project persistence
 # -----------------------------
 _PROJECT_WIDGET_KEYS = [
@@ -5098,25 +4790,6 @@ def _sync_live_editor_state_to_questions():
     for q in questions:
         no = q.source_no
 
-        # v6.16.8 critical safety fix:
-        # After a ChatGPT JSON safe-update, the Question model already contains
-        # the NEW analysis, but the old Streamlit text-area values may still be
-        # present in session_state until the workbench is rendered again.
-        #
-        # _build_annual_project_zip() is rendered near the top of the page and
-        # calls this function BEFORE the workbench gets a chance to consume
-        # _chatgpt_sync_{no}.  In v6.16.6/7 this could therefore copy OLD widget
-        # text back into the Question object immediately after a successful JSON
-        # update, making the screen appear to "revert".
-        #
-        # While a one-time ChatGPT sync is pending, the model is authoritative:
-        # do NOT copy formal analysis widgets back into it.  We deliberately do
-        # not pop the flag here; the workbench later consumes it and refreshes
-        # all visible widgets from the new model values.
-        pending_chatgpt_sync = bool(
-            st.session_state.get(f"_chatgpt_sync_{no}", False)
-        )
-
         # Formal content editor fields
         mapping = {
             f"trans_{no}": "translation",
@@ -5128,10 +4801,9 @@ def _sync_live_editor_state_to_questions():
             f"note_{no}": "note_strategy",
             f"note_table_{no}": "note_strategy_table_json",
         }
-        if not pending_chatgpt_sync:
-            for key, attr in mapping.items():
-                if key in st.session_state:
-                    setattr(q, attr, st.session_state.get(key, ""))
+        for key, attr in mapping.items():
+            if key in st.session_state:
+                setattr(q, attr, st.session_state.get(key, ""))
 
         # Review / visual output flags
         for key in (f"wb_reviewed_{no}", f"side_wb_reviewed_{no}"):
@@ -5711,7 +5383,7 @@ def _load_annual_project_zip(zip_bytes: bytes):
                 }
         st.session_state.project_sources = restored_sources
 
-        # v6.16.5: universal project compatibility pass.
+        # v6.17.0: universal project compatibility pass.
         # Original annual sources bundled in the ZIP are used only to UPGRADE
         # weak/misaligned publisher reference blocks. Existing good blocks and
         # all teacher-edited Question fields remain untouched.
@@ -6668,8 +6340,7 @@ with edit_tab:
             st.markdown("#### 步驟 2｜把 ChatGPT 回傳的 JSON 檔上傳回來")
             st.caption(
                 "ChatGPT 完成後，下載它提供的 .json 檔，再直接上傳到這裡。"
-                "v6.16.6 採「安全更新」：只更新建議能力類型、三家比較、字詞查證、語譯、詳解、教學重點、教學步驟與筆記；"
-                "不會修改選題、題幹、選項、官方答案、通過率、最終能力類型、題組、圖片或版面設定。"
+                "程式會自動預檢題數、能力類型建議與五個內容欄位，不需要打開 JSON，也不用複製貼上。"
             )
             result_json_file = st.file_uploader(
                 "上傳 ChatGPT 完成稿 JSON",
@@ -6677,18 +6348,6 @@ with edit_tab:
                 key="batch_chatgpt_json_upload",
                 help="請上傳 ChatGPT 依本次分析包產生的 JSON 完成稿。"
             )
-
-            # v6.16.6: always offer a one-click rollback point before applying JSON.
-            if st.session_state.questions:
-                st.download_button(
-                    "🛡️ 先下載「更新前」專案備份 ZIP",
-                    data=_build_annual_project_zip(),
-                    file_name=f"{int(st.session_state.year)}_套用JSON前_專案備份.zip",
-                    mime="application/zip",
-                    key="download_pre_safe_json_backup",
-                    use_container_width=True,
-                    help="建議第一次使用安全更新時先下載。這份 ZIP 保留目前選題、圖片與全部內容，可隨時復原。"
-                )
 
             uploaded_json_text = ""
             if result_json_file is not None:
@@ -6732,33 +6391,17 @@ with edit_tab:
                         for err in preview_errors:
                             st.write("• " + err)
 
-                safe_preview_rows = _safe_analysis_update_preview(preview_parsed, batch_questions)
-                if safe_preview_rows:
-                    with st.expander("🛡️ 安全更新預覽｜查看每題會更新哪些分析欄位", expanded=False):
-                        st.dataframe(safe_preview_rows, use_container_width=True, hide_index=True)
-                        st.success(
-                            "保護欄位：選題狀態、題幹、選項、官方答案、通過率、最終能力類型、"
-                            "題組資料、原題圖片、版面設定與校對狀態都不會被這次 JSON 改動。"
-                        )
-
             def _import_batch_chatgpt_callback():
                 parsed_all, errors = _parse_batch_chatgpt_result(
                     st.session_state.get("batch_chatgpt_result", ""), batch_questions
                 )
-                try:
-                    count, updated_nos = _apply_safe_analysis_update(
-                        parsed_all, batch_questions
-                    )
-                    st.session_state["batch_import_count"] = count
-                    st.session_state["batch_import_updated_nos"] = updated_nos
-                    st.session_state["batch_import_errors"] = errors
-                except Exception as e:
-                    st.session_state["batch_import_count"] = 0
-                    st.session_state["batch_import_updated_nos"] = []
-                    st.session_state["batch_import_errors"] = errors + [str(e)]
+                st.session_state["batch_import_count"] = _apply_batch_chatgpt_result(
+                    parsed_all, batch_questions
+                )
+                st.session_state["batch_import_errors"] = errors
 
             st.button(
-                "步驟 4｜🛡️ 安全更新已辨識題目的分析內容",
+                "步驟 4｜⬇️ 匯入已成功辨識的全部題目",
                 key="import_batch_chatgpt_result",
                 on_click=_import_batch_chatgpt_callback,
                 type="primary",
@@ -6770,19 +6413,8 @@ with edit_tab:
                 count = st.session_state.pop("batch_import_count")
                 errs = st.session_state.pop("batch_import_errors", [])
                 if count:
-                    updated_nos = st.session_state.pop("batch_import_updated_nos", [])
-                    st.success(
-                        f"安全更新完成：已更新 {count} 題分析內容"
-                        + (f"（第{'、'.join(str(x) for x in updated_nos)}題）" if updated_nos else "")
-                        + "。"
-                    )
-                    st.info(
-                        "已完成保護檢查：選題、題幹、選項、答案、通過率、最終能力類型、題組、圖片與版面設定均未修改。"
-                        "v6.16.8 會在本次 rerun 期間保護新版分析內容，避免舊文字框狀態把它覆寫回去。"
-                        "接下來可直接往下逐題校對【詳解】【教學重點】【教學步驟】【筆記策略】。"
-                    )
-                if not count:
-                    st.session_state.pop("batch_import_updated_nos", None)
+                    st.success(f"已成功匯入 {count} 題。接下來直接往下逐題檢查與微調，不需要再貼任何 ChatGPT 內容。")
+                    st.info("下一步：逐題確認【三家比較筆記】【字詞查證紀錄】；文言文題再確認【語譯撰寫依據】【建議語譯】；並校對【建議詳解】【教學重點】【建議教學步驟】【筆記策略】；若某一題真的需要重做，再展開該題的「進階／單題重做」。")
                 if errs:
                     st.warning("；".join(errs))
             st.divider()
@@ -7327,6 +6959,12 @@ with output_tab:
         else:
             st.success("目前選取題目皆已完成結構校對。")
 
+        st.markdown("#### 正式學生版／教師版")
+        st.caption(
+            "此區輸出的就是你提供的既有正式排版：學生題本與詳解／教學法教師版。"
+            "內容來自目前專案的正式編輯欄，文字仍可在 Word 中選取、複製與修改。"
+        )
+
         output_mode = st.radio(
             "Word 題本版型",
             ["可編輯原會考風格（推薦）", "原 PDF 圖像版", "一般可編輯文字版"],
@@ -7335,13 +6973,31 @@ with output_tab:
         )
         suffix = st.text_input("學生題本標題", value=f"{int(st.session_state.year)}年國中教育會考 國文科", help="這裡會原樣成為 Word 頁首主標題，可直接改成你的正式範本標題。")
         template_kind = st.radio(
-            "Word 母版",
+            "正式題本 Word 範本",
             ["八成以上", "六成至七成", "自訂簡版"],
             horizontal=True,
-            help="前兩項直接套用你先前提供的114年正式成品 Word 版型；自訂簡版才使用上方自行輸入的標題。"
+            help="前兩項直接套用你這次提供的115年正式學生版／教師版成品版型；自訂簡版才使用上方自行輸入的標題。"
         )
         if template_kind != "自訂簡版":
-            st.info(f"目前使用「{template_kind}」實際成品 Word 作為母版：保留原本頁面設定、標題格式、姓名欄與「壹、單題」區塊，再插入本次選題。")
+            st.info(f"目前使用你提供的115「{template_kind}」正式學生／教師版 Word 作為母版：保留原本頁面設定、標題格式、姓名欄與章節區塊，再插入本次選題。學生版與教師版各使用自己的正式母版，不互相套版。")
+            _student_tpl = _template_path(template_kind, False)
+            _teacher_tpl = _template_path(template_kind, True)
+            if _student_tpl.exists() and _teacher_tpl.exists():
+                st.success(
+                    "正式範本檢查：學生版、教師版皆已載入。"
+                    "這兩份就是你提供的115正式排版，不是『質感版』。"
+                )
+            else:
+                _missing = []
+                if not _student_tpl.exists():
+                    _missing.append("學生版")
+                if not _teacher_tpl.exists():
+                    _missing.append("教師版")
+                st.error(
+                    "缺少正式 Word 範本：" + "、".join(_missing) +
+                    "。請使用 v6.17.0 完整 ZIP 執行；若只單獨放 app.py，"
+                    "必須把四份 template_*.docx 放在 app.py 同一資料夾。"
+                )
         booklet_no = st.text_input(
             "題本編號",
             value="1",
@@ -7427,7 +7083,13 @@ with output_tab:
             st.download_button(
                 "⬇️ 下載學生題本 Word",
                 data=student_bytes,
-                file_name=f"{st.session_state.year}年會考國文_{suffix}_題本{booklet_no.strip() or '自動'}.docx",
+                file_name=(
+                    _formal_booklet_filename(
+                        int(st.session_state.year), template_kind, booklet_no, False
+                    )
+                    if template_kind != "自訂簡版"
+                    else f"{st.session_state.year}年會考國文_{suffix}_題本{booklet_no.strip() or '自動'}.docx"
+                ),
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 type="primary",
                 use_container_width=True
@@ -7436,7 +7098,13 @@ with output_tab:
             st.download_button(
                 "⬇️ 下載詳解／教學法 Word",
                 data=teacher_bytes,
-                file_name=f"{st.session_state.year}年會考國文_{suffix}_題本{booklet_no.strip() or '自動'}(詳解_教學法).docx",
+                file_name=(
+                    _formal_booklet_filename(
+                        int(st.session_state.year), template_kind, booklet_no, True
+                    )
+                    if template_kind != "自訂簡版"
+                    else f"{st.session_state.year}年會考國文_{suffix}_題本{booklet_no.strip() or '自動'}(詳解_教學法).docx"
+                ),
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True
             )
