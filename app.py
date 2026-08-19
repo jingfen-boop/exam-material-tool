@@ -23,7 +23,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pptx import Presentation
 
-APP_VERSION = "Web v6.17.0 115正式學生／教師版範本整合版"
+APP_VERSION = "Web v6.17.1 正式成品排版對齊版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -1027,7 +1027,11 @@ def _add_legacy_teacher_box(doc, q: Question):
     """One thin black box per question, matching the historical teacher edition."""
     table = doc.add_table(rows=1, cols=1)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = True
+    table.autofit = False
+    try:
+        table.columns[0].width = Cm(16.5)
+    except Exception:
+        pass
     _set_teacher_box_borders(table)
     cell = table.cell(0, 0)
     _set_cell_margins(cell, top=0, start=108, bottom=0, end=108)
@@ -1303,13 +1307,7 @@ def _add_editable_options(doc, q: Question, two_columns=False):
             set_eastasia(r)
             r.font.size = Pt(10.5)
         # Remove table borders for exam-like appearance.
-        tblPr = table._tbl.tblPr
-        borders = OxmlElement("w:tblBorders")
-        for edge in ("top","left","bottom","right","insideH","insideV"):
-            el = OxmlElement(f"w:{edge}")
-            el.set(qn("w:val"), "nil")
-            borders.append(el)
-        tblPr.append(borders)
+        _remove_table_borders(table)
     else:
         for key in keys:
             p = doc.add_paragraph()
@@ -1694,8 +1692,60 @@ def _effective_layout_style(q: Question):
     return "一般直列"
 
 
+def _formal_template_layout_style(q: Question, template_kind: str):
+    """Choose the BODY layout to match the four user-provided 115 final samples.
+
+    This affects only the existing formal Student/Teacher Word export.
+    It is intentionally separate from any future "質感版" export.
+    """
+    saved = (getattr(q, "layout_style", "") or "一般直列").strip()
+    mode = _effective_render_mode(q)
+    images = list(getattr(q, "image_pngs", []) or [])
+
+    # Explicit user decisions always win.
+    if saved in ("圖片在右", "圖片在上", "選項兩欄"):
+        return saved
+
+    # The 六成至七成 final samples use a borderless 2-column question block
+    # when a single question has a compact supporting picture/table on the right
+    # (e.g. 鬲、魏三體石經、投壺計分表).
+    if template_kind == "六成至七成" and mode == "圖文混合" and images:
+        try:
+            im = Image.open(io.BytesIO(images[0]))
+            w, h = im.size
+            # Compact figure/table: reproduce the right-side layout.
+            # Large reading material remains a centered block handled elsewhere.
+            if w <= 1500 and h <= 1200:
+                return "圖片在右"
+        except Exception:
+            return "圖片在右"
+
+    # 八成以上 sample generally keeps question text in the normal full-width flow;
+    # image-heavy items are already classified as 整題圖像 / group material.
+    return "一般直列"
+
+
+def _set_formal_question_paragraph(p, before_pt=1, after_pt=0):
+    """Paragraph rhythm matching the provided 115 final student/teacher files."""
+    _set_body_paragraph_format(p, before=before_pt, after=after_pt)
+    p.paragraph_format.line_spacing = 1.0
+
+
+def _remove_table_borders(table):
+    tblPr = table._tbl.tblPr
+    old = tblPr.first_child_found_in("w:tblBorders")
+    if old is not None:
+        tblPr.remove(old)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "nil")
+        borders.append(el)
+    tblPr.append(borders)
+
+
 def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
-                               show_material=True, year=None):
+                               show_material=True, year=None, template_kind="自訂簡版"):
     material_text = _clean_word_text(q.material)
     stem_text = _clean_word_text(q.text)
 
@@ -1705,14 +1755,14 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
         r = p.add_run(material_text)
         _set_run_word_style(r, size=13)
 
-    style = _effective_layout_style(q)
+    style = _formal_template_layout_style(q, template_kind) if template_kind in ("八成以上", "六成至七成") else _effective_layout_style(q)
 
     if style == "圖片在右" and q.include_image and q.image_pngs:
         table = doc.add_table(rows=1, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.autofit = False
-        table.columns[0].width = Cm(10.7)
-        table.columns[1].width = Cm(6.0)
+        table.columns[0].width = Cm(11.2)
+        table.columns[1].width = Cm(5.5)
         c0, c1 = table.cell(0,0), table.cell(0,1)
         p = c0.paragraphs[0]
         _set_body_paragraph_format(p, after=0)
@@ -1721,15 +1771,9 @@ def add_editable_exam_question(doc, q: Question, display_no: int, teacher=False,
         _set_run_word_style(r, size=13)
         if year is not None:
             add_meta_runs(p, year, q.source_no, q.pass_rate, q.category)
-        _add_first_image_to_cell(c1, q, width_cm=5.6)
+        _add_first_image_to_cell(c1, q, width_cm=5.2)
 
-        tblPr = table._tbl.tblPr
-        borders = OxmlElement("w:tblBorders")
-        for edge in ("top","left","bottom","right","insideH","insideV"):
-            el = OxmlElement(f"w:{edge}")
-            el.set(qn("w:val"), "nil")
-            borders.append(el)
-        tblPr.append(borders)
+        _remove_table_borders(table)
     else:
         p = doc.add_paragraph()
         _set_body_paragraph_format(p, before=1, after=0)
@@ -2014,7 +2058,8 @@ def make_editable_exam_layout_docx(questions: List[Question], year: int, title_s
             start_index = list(body).index(sectPr) if sectPr is not None else len(list(body))
             add_editable_exam_question(
                 doc, q, i, teacher=teacher,
-                show_material=show_material, year=year
+                show_material=show_material, year=year,
+                template_kind=template_kind
             )
             # v6.12.17: DO NOT wrap short questions in a hidden 1x1 table.
             # Word can collapse auto-width hidden tables into a very narrow column,
@@ -5383,7 +5428,7 @@ def _load_annual_project_zip(zip_bytes: bytes):
                 }
         st.session_state.project_sources = restored_sources
 
-        # v6.17.0: universal project compatibility pass.
+        # v6.17.1: universal project compatibility pass.
         # Original annual sources bundled in the ZIP are used only to UPGRADE
         # weak/misaligned publisher reference blocks. Existing good blocks and
         # all teacher-edited Question fields remain untouched.
@@ -6961,8 +7006,9 @@ with output_tab:
 
         st.markdown("#### 正式學生版／教師版")
         st.caption(
-            "此區輸出的就是你提供的既有正式排版：學生題本與詳解／教學法教師版。"
-            "內容來自目前專案的正式編輯欄，文字仍可在 Word 中選取、複製與修改。"
+            "此區的「學生版／教師版」就是你原本使用的正式排版，已依這次四份115成品對齊："
+            "八成學生版、八成教師版、六至七成學生版、六至七成教師版。"
+            "不是質感版；內容仍是可編輯、可複製的 Word 文字／表格，原題圖表則保留圖片。"
         )
 
         output_mode = st.radio(
@@ -6995,7 +7041,7 @@ with output_tab:
                     _missing.append("教師版")
                 st.error(
                     "缺少正式 Word 範本：" + "、".join(_missing) +
-                    "。請使用 v6.17.0 完整 ZIP 執行；若只單獨放 app.py，"
+                    "。請使用 v6.17.1 完整 ZIP 執行；若只單獨放 app.py，"
                     "必須把四份 template_*.docx 放在 app.py 同一資料夾。"
                 )
         booklet_no = st.text_input(
