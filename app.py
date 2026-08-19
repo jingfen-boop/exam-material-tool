@@ -29,7 +29,7 @@ from pptx.dml.color import RGBColor as PptxRGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 
-APP_VERSION = "Web v6.18.0 質感教師手冊與課堂簡報版"
+APP_VERSION = "Web v6.18.1 教師版內容一致／高辨識質感與大字簡報版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -1995,6 +1995,8 @@ def _formal_booklet_filename(year: int, template_kind: str, booklet_no: str, tea
 
 # -----------------------------
 # Premium teacher handbook / classroom slides export
+# v6.18.1: SAME CONTENT as the current formal teacher edition.
+# Only presentation changes. No summary/index/extra explanatory prose is added.
 # -----------------------------
 def _quality_set_run(run, size=11, bold=False, color="222222", font="Microsoft JhengHei"):
     run.font.name = font
@@ -2008,391 +2010,437 @@ def _quality_set_run(run, size=11, bold=False, color="222222", font="Microsoft J
         run.font.color.rgb = RGBColor.from_string(color)
 
 
-def _quality_para(doc_or_cell, text="", size=11, bold=False, color="222222",
-                  before=0, after=3, align=None):
-    p = doc_or_cell.add_paragraph()
-    p.paragraph_format.space_before = Pt(before)
-    p.paragraph_format.space_after = Pt(after)
+def _quality_cell_text(cell, text, size=11, bold=False, color="222222",
+                       align=WD_ALIGN_PARAGRAPH.LEFT):
+    cell.text = ""
+    p = cell.paragraphs[0]
+    p.alignment = align
+    p.paragraph_format.space_before = Pt(1)
+    p.paragraph_format.space_after = Pt(1)
     p.paragraph_format.line_spacing = 1.08
-    if align is not None:
-        p.alignment = align
     r = p.add_run(_clean_word_text(text or ""))
     _quality_set_run(r, size=size, bold=bold, color=color)
     return p
 
 
-def _quality_heading(doc, text, level=1):
-    if level == 1:
-        p = _quality_para(doc, text, size=18, bold=True, color="1F2A44", before=6, after=4)
-    else:
-        p = _quality_para(doc, text, size=13, bold=True, color="C24A2E", before=8, after=2)
-    return p
+def _quality_set_table_borders(table, color="7F8C9A", size="10"):
+    tblPr = table._tbl.tblPr
+    old = tblPr.first_child_found_in("w:tblBorders")
+    if old is not None:
+        tblPr.remove(old)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), size)
+        el.set(qn("w:color"), color)
+        borders.append(el)
+    tblPr.append(borders)
 
 
-def _quality_badge_row(doc, q, display_no, year):
+def _quality_meta_table(doc, q, display_no, year):
     tbl = doc.add_table(rows=1, cols=4)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.autofit = False
-    labels = [
+    widths = [3.1, 3.1, 4.0, 6.0]
+    vals = [
         f"第 {display_no} 題",
-        f"答案 {q.answer or '—'}",
-        f"通過率 {q.pass_rate:.2f}" if q.pass_rate is not None else "通過率 —",
-        q.category or "能力類型 —",
+        f"答案：{q.answer or '—'}",
+        f"{year} 年第 {q.source_no} 題｜通過率：{q.pass_rate:.2f}" if q.pass_rate is not None
+        else f"{year} 年第 {q.source_no} 題｜通過率：—",
+        f"能力類型：{q.category or '—'}",
     ]
-    fills = ["EAF0F8", "FCE4D6", "E2F0D9", "FFF2CC"]
-    for i, lab in enumerate(labels):
+    fills = ["D9E2F3", "F4CCCC", "D9EAD3", "FFF2CC"]
+    for i, (v, w) in enumerate(zip(vals, widths)):
+        try:
+            tbl.columns[i].width = Cm(w)
+        except Exception:
+            pass
         c = tbl.cell(0, i)
-        c.text = ""
-        _set_cell_margins(c, top=70, bottom=70, start=80, end=80)
+        _set_cell_margins(c, top=85, bottom=85, start=90, end=90)
         set_cell_shading(c, fills[i])
-        p = c.paragraphs[0]
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(_clean_word_text(lab))
-        _quality_set_run(r, size=10.5, bold=True, color="1F2A44")
+        _quality_cell_text(c, v, size=10.5, bold=True, color="1F2A44",
+                           align=WD_ALIGN_PARAGRAPH.CENTER)
+    _quality_set_table_borders(tbl, color="7F8C9A", size="10")
     return tbl
 
 
-def _quality_kv_box(doc, title, body, fill="F7F9FC", accent="C24A2E"):
-    if not (body or "").strip():
-        return None
+def _quality_question_content_table(doc, q):
+    """Question body only; no content not present in the formal teacher edition."""
     tbl = doc.add_table(rows=1, cols=1)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.autofit = False
     try:
-        tbl.columns[0].width = Cm(16.6)
+        tbl.columns[0].width = Cm(16.2)
     except Exception:
         pass
-    _set_teacher_box_borders(tbl)
+    _quality_set_table_borders(tbl, color="566573", size="12")
     cell = tbl.cell(0, 0)
-    _set_cell_margins(cell, top=100, bottom=100, start=140, end=140)
-    set_cell_shading(cell, fill)
-    cell.text = ""
-    p = cell.paragraphs[0]
-    p.paragraph_format.space_after = Pt(2)
-    r = p.add_run(title)
-    _quality_set_run(r, size=12, bold=True, color=accent)
-    for line in _clean_word_text(body).splitlines() or [""]:
-        p = cell.add_paragraph()
-        p.paragraph_format.space_after = Pt(1)
-        p.paragraph_format.line_spacing = 1.08
-        r = p.add_run(line)
-        _quality_set_run(r, size=10.5, color="222222")
-    return tbl
-
-
-def _quality_question_box(doc, q, display_no, year):
-    _quality_heading(doc, f"第 {display_no} 題", level=1)
-    _quality_badge_row(doc, q, display_no, year)
-
-    tbl = doc.add_table(rows=1, cols=1)
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tbl.autofit = False
-    try:
-        tbl.columns[0].width = Cm(16.6)
-    except Exception:
-        pass
-    _set_teacher_box_borders(tbl)
-    cell = tbl.cell(0, 0)
-    _set_cell_margins(cell, top=120, bottom=120, start=140, end=140)
+    _set_cell_margins(cell, top=120, bottom=120, start=150, end=150)
     set_cell_shading(cell, "FFFFFF")
     cell.text = ""
 
-    if (q.material or "").strip():
+    # Same question content as formal teacher edition.
+    first = True
+    if (q.material or "").strip() and not (q.group_id or "").strip():
         p = cell.paragraphs[0]
-        r = p.add_run("閱讀／共用材料")
-        _quality_set_run(r, size=11, bold=True, color="C24A2E")
-        for line in _clean_word_text(q.material).splitlines():
-            pp = cell.add_paragraph()
-            pp.paragraph_format.space_after = Pt(1)
-            rr = pp.add_run(line)
-            _quality_set_run(rr, size=10.5, color="222222")
-    else:
-        p = cell.paragraphs[0]
-        p.paragraph_format.space_after = Pt(1)
+        p.text = ""
+        r = p.add_run(_clean_word_text(q.material))
+        _quality_set_run(r, size=11, color="222222")
+        first = False
 
-    p = cell.add_paragraph()
-    r = p.add_run("題幹")
-    _quality_set_run(r, size=11, bold=True, color="C24A2E")
-    p = cell.add_paragraph()
+    p = cell.paragraphs[0] if first else cell.add_paragraph()
+    p.paragraph_format.space_after = Pt(2)
     r = p.add_run(_clean_word_text(q.text or ""))
-    _quality_set_run(r, size=10.8, color="222222")
-    for k in ("A", "B", "C", "D"):
-        val = (q.options or {}).get(k, "")
-        if val:
-            p = cell.add_paragraph()
-            p.paragraph_format.left_indent = Cm(0.35)
-            r = p.add_run(f"({k}) {_clean_word_text(val)}")
-            _quality_set_run(r, size=10.5, color="222222")
+    _quality_set_run(r, size=11.5, bold=False, color="111111")
 
-    # Keep visual sources as images where appropriate; text remains editable.
-    img = None
-    if getattr(q, "body_crop_png", None):
-        img = q.body_crop_png
-    elif getattr(q, "image_pngs", None):
-        img = q.image_pngs[0] if q.image_pngs else None
-    elif getattr(q, "crop_png", None) and _effective_render_mode(q) == "整題圖像":
-        img = q.crop_png
-    if img:
+    # Source images stay images.
+    imgs = []
+    if getattr(q, "body_crop_png", None) and _effective_render_mode(q) == "整題圖像":
+        imgs = [q.body_crop_png]
+    elif getattr(q, "image_pngs", None) and q.include_image:
+        imgs = list(q.image_pngs or [])
+    for data in imgs:
         p = cell.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         try:
-            p.add_run().add_picture(io.BytesIO(img), width=Cm(12.5))
+            im = Image.open(io.BytesIO(data))
+            w, h = im.size
+            width_cm = 13.8 if w >= h else 9.2
+            p.add_run().add_picture(io.BytesIO(data), width=Cm(width_cm))
         except Exception:
             pass
 
+    if _effective_render_mode(q) != "整題圖像":
+        for k in ("A", "B", "C", "D"):
+            val = (q.options or {}).get(k, "")
+            if val:
+                p = cell.add_paragraph()
+                p.paragraph_format.left_indent = Cm(0.25)
+                p.paragraph_format.space_after = Pt(1)
+                r = p.add_run(f"({k}) {_clean_word_text(val)}")
+                _quality_set_run(r, size=11, color="222222")
+    return tbl
 
-def _quality_add_note_table(doc, raw):
+
+def _quality_teacher_field(doc, label, body, label_fill, body_fill="FFFFFF"):
+    if not (body or "").strip():
+        return None
+    tbl = doc.add_table(rows=1, cols=2)
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tbl.autofit = False
+    try:
+        tbl.columns[0].width = Cm(2.5)
+        tbl.columns[1].width = Cm(13.7)
+    except Exception:
+        pass
+    _quality_set_table_borders(tbl, color="566573", size="12")
+    lc, bc = tbl.cell(0, 0), tbl.cell(0, 1)
+    _set_cell_margins(lc, top=100, bottom=100, start=100, end=100)
+    _set_cell_margins(bc, top=100, bottom=100, start=130, end=130)
+    set_cell_shading(lc, label_fill)
+    set_cell_shading(bc, body_fill)
+    _quality_cell_text(lc, label, size=11, bold=True, color="1F2A44",
+                       align=WD_ALIGN_PARAGRAPH.CENTER)
+    bc.text = ""
+    lines = _clean_word_text(body).splitlines() or [""]
+    for i, line in enumerate(lines):
+        p = bc.paragraphs[0] if i == 0 else bc.add_paragraph()
+        p.paragraph_format.space_after = Pt(1)
+        p.paragraph_format.line_spacing = 1.08
+        r = p.add_run(line)
+        _quality_set_run(r, size=10.8, color="222222")
+    return tbl
+
+
+def _quality_note_table(doc, raw):
     spec = _parse_note_strategy_table(_normalize_language_note_table(raw or ""))
     if not spec:
         return False
-    _quality_heading(doc, "課堂筆記", level=2)
+    # Same content as formal teacher edition; table stays a real Word table.
     if spec.get("title"):
-        _quality_para(doc, spec["title"], size=10.5, color="555555", after=2)
+        _quality_teacher_field(doc, "筆記", spec["title"], "E4DFEC", "FAF9FC")
     tbl = doc.add_table(rows=1, cols=len(spec["columns"]))
     tbl.style = "Table Grid"
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.autofit = True
+    _quality_set_table_borders(tbl, color="566573", size="12")
     for j, col in enumerate(spec["columns"]):
         c = tbl.cell(0, j)
-        c.text = ""
-        set_cell_shading(c, "EAF0F8")
-        p = c.paragraphs[0]
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(_clean_word_text(col))
-        _quality_set_run(r, size=10.5, bold=True, color="1F2A44")
+        set_cell_shading(c, "D9E2F3")
+        _quality_cell_text(c, col, size=10.8, bold=True, color="1F2A44",
+                           align=WD_ALIGN_PARAGRAPH.CENTER)
     for row in spec["rows"]:
         cells = tbl.add_row().cells
         for j, val in enumerate(row):
-            cells[j].text = ""
-            p = cells[j].paragraphs[0]
-            r = p.add_run(_clean_word_text(val))
-            _quality_set_run(r, size=10.2, color="222222")
+            set_cell_shading(cells[j], "FFFFFF" if len(tbl.rows) % 2 else "F7F9FC")
+            _quality_cell_text(cells[j], val, size=10.5, color="222222")
     if spec.get("footer"):
-        _quality_para(doc, spec["footer"], size=10, color="666666", after=4)
+        _quality_teacher_field(doc, "備註", spec["footer"], "E4DFEC", "FAF9FC")
     return True
 
 
 def make_quality_teacher_handbook_docx(questions: List[Question], year: int, title_suffix: str,
                                        template_kind="自訂簡版", booklet_no=""):
-    """Readable premium teacher handbook.
-
-    Content is based on the same formal fields as the standard teacher edition,
-    but arranged as a cleaner handbook. All normal text and note tables remain
-    editable/copyable Word content; only source figures stay as images.
-    """
+    """Premium layout, but content equals the current formal teacher edition."""
     selected = [q for q in questions if q.selected]
     doc = Document()
     sec = doc.sections[0]
-    sec.page_width = Cm(21)
-    sec.page_height = Cm(29.7)
-    sec.top_margin = Cm(1.35)
-    sec.bottom_margin = Cm(1.25)
-    sec.left_margin = Cm(1.45)
-    sec.right_margin = Cm(1.45)
+    sec.page_width, sec.page_height = Cm(21), Cm(29.7)
+    sec.top_margin, sec.bottom_margin = Cm(1.2), Cm(1.2)
+    sec.left_margin, sec.right_margin = Cm(1.35), Cm(1.35)
 
     normal = doc.styles["Normal"]
     normal.font.name = "Microsoft JhengHei"
     normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft JhengHei")
     normal.font.size = Pt(10.5)
 
-    label = "八成以上" if template_kind == "八成以上" else "六成至七成" if template_kind == "六成至七成" else "自訂"
+    # Same booklet title content; no extra overview/subtitle.
+    label = ("通過率達八成以上" if template_kind == "八成以上"
+             else "通過率達六成至七成" if template_kind == "六成至七成"
+             else (title_suffix or "").strip())
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run(f"{year} 會考國文教師手冊｜{label} 題本 {booklet_no.strip() or ''}".strip())
-    _quality_set_run(r, size=20, bold=True, color="1F2A44")
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("質感版：同一份正式內容，不改字句，只重新整理為方便備課與複製的版面")
-    _quality_set_run(r, size=10.5, color="666666")
+    p.paragraph_format.space_after = Pt(8)
+    r = p.add_run(f"{year}年會考國文題本-{label}-題本{booklet_no.strip() or '自動'}（詳解_教學法）")
+    _quality_set_run(r, size=18, bold=True, color="1F2A44")
 
-    # quick index
-    _quality_heading(doc, "本冊題目總覽", level=2)
-    idx_tbl = doc.add_table(rows=1, cols=5)
-    idx_tbl.style = "Table Grid"
-    headers = ["題號", "答案", "通過率", "能力類型", "原題號"]
-    for j, h in enumerate(headers):
-        c = idx_tbl.cell(0, j); c.text = ""; set_cell_shading(c, "EAF0F8")
-        p = c.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(h); _quality_set_run(r, size=10, bold=True, color="1F2A44")
+    # Preserve the formal teacher edition's question sequence/content.
     for i, q in enumerate(selected, start=1):
-        cells = idx_tbl.add_row().cells
-        vals = [str(i), q.answer or "—", f"{q.pass_rate:.2f}" if q.pass_rate is not None else "—", q.category or "—", str(q.source_no)]
-        for j, v in enumerate(vals):
-            cells[j].text = ""
-            p = cells[j].paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            r = p.add_run(_clean_word_text(v)); _quality_set_run(r, size=9.5, color="222222")
-
-    doc.add_page_break()
-
-    for i, q in enumerate(selected, start=1):
-        _quality_question_box(doc, q, i, year)
-        if (getattr(q, "translation", "") or "").strip():
-            _quality_kv_box(doc, "語譯", q.translation, fill="FFFDF5", accent="8A5A00")
-        _quality_kv_box(doc, "詳解", q.explanation or "（待補）", fill="F7F9FC", accent="C24A2E")
+        _quality_meta_table(doc, q, i, year)
+        _quality_question_content_table(doc, q)
+        _quality_teacher_field(doc, "解析", q.explanation or "（待補）", "F4CCCC", "FFF8F6")
         if (q.teaching_focus or "").strip():
-            _quality_kv_box(doc, "教學重點", q.teaching_focus, fill="F8FBF7", accent="548235")
-        _quality_kv_box(doc, "教學步驟", q.teaching or "（待補）", fill="F8FBF7", accent="548235")
+            _quality_teacher_field(doc, "教學重點", q.teaching_focus, "D9EAD3", "F8FCF7")
+        _quality_teacher_field(doc, "教學步驟", q.teaching or "（待補）", "D9EAD3", "F8FCF7")
         if (q.note_strategy or "").strip():
-            _quality_kv_box(doc, "筆記策略", q.note_strategy, fill="F9F7FC", accent="7030A0")
-        _quality_add_note_table(doc, q.note_strategy_table_json)
+            _quality_teacher_field(doc, "筆記策略", q.note_strategy, "E4DFEC", "FAF9FC")
+        _quality_note_table(doc, q.note_strategy_table_json)
         if i != len(selected):
-            doc.add_page_break()
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(4)
 
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
 
 
-def _ppt_textbox(slide, x, y, w, h, text, size=18, bold=False,
-                 color="1F2A44", fill=None, align=None):
-    shape = slide.shapes.add_textbox(PptxInches(x), PptxInches(y), PptxInches(w), PptxInches(h))
+# ---------- PPTX: minimum title 36 pt / body 24 pt ----------
+def _ppt_add_text(slide, x, y, w, h, text, size=24, bold=False,
+                  color="222222", fill=None, align=PP_ALIGN.LEFT):
+    shape = slide.shapes.add_textbox(PptxInches(x), PptxInches(y),
+                                     PptxInches(w), PptxInches(h))
     tf = shape.text_frame
     tf.clear()
     tf.word_wrap = True
-    tf.margin_left = PptxInches(0.06)
-    tf.margin_right = PptxInches(0.06)
-    tf.margin_top = PptxInches(0.03)
-    tf.margin_bottom = PptxInches(0.03)
+    tf.margin_left = PptxInches(0.08)
+    tf.margin_right = PptxInches(0.08)
+    tf.margin_top = PptxInches(0.05)
+    tf.margin_bottom = PptxInches(0.05)
     p = tf.paragraphs[0]
-    if align is not None:
-        p.alignment = align
-    run = p.add_run()
-    run.text = _clean_word_text(text or "")
-    run.font.name = "Microsoft JhengHei"
-    run.font.size = PptxPt(size)
-    run.font.bold = bold
-    run.font.color.rgb = PptxRGBColor.from_string(color)
+    p.alignment = align
+    r = p.add_run()
+    r.text = _clean_word_text(text or "")
+    r.font.name = "Microsoft JhengHei"
+    r.font.size = PptxPt(max(24, size))
+    r.font.bold = bold
+    r.font.color.rgb = PptxRGBColor.from_string(color)
     if fill:
         shape.fill.solid()
         shape.fill.fore_color.rgb = PptxRGBColor.from_string(fill)
-        shape.line.color.rgb = PptxRGBColor.from_string(fill)
+        shape.line.color.rgb = PptxRGBColor.from_string("7F8C9A")
     return shape
 
 
-def _ppt_add_lines(slide, x, y, w, h, title, body, max_chars=900):
-    _ppt_textbox(slide, x, y, w, 0.35, title, size=16, bold=True, color="C24A2E")
-    txt = _clean_word_text(body or "")
-    if len(txt) > max_chars:
-        txt = txt[:max_chars].rstrip() + "……"
-    _ppt_textbox(slide, x, y+0.42, w, h-0.42, txt, size=12.5, color="222222", fill="F7F9FC")
+def _ppt_title(slide, text):
+    return _ppt_add_text(slide, 0.45, 0.18, 12.4, 0.65, text,
+                         size=36, bold=True, color="1F2A44")
 
 
-def _ppt_save_image(data):
+def _ppt_chunks(text, max_chars=300):
+    """Split only for readability; never delete/truncate teacher-edition content."""
+    s = _clean_word_text(text or "").strip()
+    if not s:
+        return [""]
+    paras = [x.strip() for x in s.splitlines() if x.strip()]
+    chunks, cur = [], ""
+    for para in paras:
+        # Hard-wrap very long paragraph without changing characters.
+        pieces = textwrap.wrap(para, width=max_chars, break_long_words=False,
+                               break_on_hyphens=False) or [para]
+        for piece in pieces:
+            if cur and len(cur) + 1 + len(piece) > max_chars:
+                chunks.append(cur)
+                cur = piece
+            else:
+                cur = piece if not cur else cur + "\n" + piece
+    if cur:
+        chunks.append(cur)
+    return chunks or [""]
+
+
+def _ppt_image_temp(data):
     if not data:
         return None
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    f.write(data)
-    f.close()
+    f.write(data); f.close()
     return f.name
 
 
-def _ppt_add_image(slide, img_data, x, y, w, h):
-    path = _ppt_save_image(img_data)
+def _ppt_place_image(slide, data, x, y, w, h):
+    path = _ppt_image_temp(data)
     if not path:
         return
     try:
-        # Simple contain-fit.
         im = Image.open(path)
         iw, ih = im.size
-        ratio = min(w / max(iw, 1), h / max(ih, 1))
-        # Convert pixel ratio to inches by preserving box ratio; easiest: use height or width.
-        box_ratio = w / h
-        img_ratio = iw / max(ih, 1)
-        if img_ratio >= box_ratio:
-            slide.shapes.add_picture(path, PptxInches(x), PptxInches(y + (h - w/img_ratio)/2), width=PptxInches(w))
+        ir, br = iw / max(ih, 1), w / h
+        if ir >= br:
+            hh = w / ir
+            slide.shapes.add_picture(path, PptxInches(x), PptxInches(y + (h-hh)/2),
+                                     width=PptxInches(w))
         else:
-            slide.shapes.add_picture(path, PptxInches(x + (w - h*img_ratio)/2), PptxInches(y), height=PptxInches(h))
-    except Exception:
-        pass
+            ww = h * ir
+            slide.shapes.add_picture(path, PptxInches(x + (w-ww)/2), PptxInches(y),
+                                     height=PptxInches(h))
     finally:
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
+        try: os.unlink(path)
+        except Exception: pass
 
 
-def _ppt_note_table_text(raw):
+def _ppt_add_body_slides(prs, blank, title, body, label_fill="F7F9FC"):
+    for n, chunk in enumerate(_ppt_chunks(body, 330), start=1):
+        slide = prs.slides.add_slide(blank)
+        suffix = f"（{n}/{len(_ppt_chunks(body,330))}）" if len(_ppt_chunks(body,330)) > 1 else ""
+        _ppt_title(slide, title + suffix)
+        _ppt_add_text(slide, 0.6, 1.05, 12.1, 5.95, chunk,
+                      size=24, color="222222", fill=label_fill)
+    return
+
+
+def _ppt_add_real_table(prs, blank, title, raw):
     spec = _parse_note_strategy_table(_normalize_language_note_table(raw or ""))
     if not spec:
-        return ""
-    lines = []
-    if spec.get("title"):
-        lines.append(spec["title"])
-    cols = spec["columns"]
-    lines.append("｜".join(cols))
-    for row in spec["rows"]:
-        lines.append("｜".join(row))
-    if spec.get("footer"):
-        lines.append(spec["footer"])
-    return "\n".join(lines)
+        return
+    # Split rows so 24pt remains readable. Repeat header on each slide.
+    rows_per_slide = 4 if len(spec["columns"]) <= 3 else 3
+    rows = spec["rows"] or []
+    groups = [rows[i:i+rows_per_slide] for i in range(0, len(rows), rows_per_slide)] or [[]]
+    for gi, group in enumerate(groups, start=1):
+        slide = prs.slides.add_slide(blank)
+        suffix = f"（{gi}/{len(groups)}）" if len(groups) > 1 else ""
+        _ppt_title(slide, title + suffix)
+        if spec.get("title"):
+            _ppt_add_text(slide, 0.65, 0.92, 12.0, 0.55, spec["title"],
+                          size=24, bold=True, color="7030A0")
+            y = 1.55
+        else:
+            y = 1.05
+        rows_n, cols_n = 1 + len(group), len(spec["columns"])
+        shape = slide.shapes.add_table(rows_n, cols_n, PptxInches(0.6),
+                                       PptxInches(y), PptxInches(12.1),
+                                       PptxInches(5.3 if y < 1.2 else 4.8))
+        table = shape.table
+        for j, col in enumerate(spec["columns"]):
+            cell = table.cell(0, j)
+            cell.text = _clean_word_text(col)
+            cell.fill.solid(); cell.fill.fore_color.rgb = PptxRGBColor.from_string("D9E2F3")
+            for p in cell.text_frame.paragraphs:
+                p.alignment = PP_ALIGN.CENTER
+                for r in p.runs:
+                    r.font.name = "Microsoft JhengHei"; r.font.size = PptxPt(24); r.font.bold = True
+                    r.font.color.rgb = PptxRGBColor.from_string("1F2A44")
+        for ri, row in enumerate(group, start=1):
+            for j, val in enumerate(row):
+                cell = table.cell(ri, j)
+                cell.text = _clean_word_text(val)
+                cell.fill.solid(); cell.fill.fore_color.rgb = PptxRGBColor.from_string("FFFFFF")
+                for p in cell.text_frame.paragraphs:
+                    for r in p.runs:
+                        r.font.name = "Microsoft JhengHei"; r.font.size = PptxPt(24)
+                        r.font.color.rgb = PptxRGBColor.from_string("222222")
+        if spec.get("footer") and gi == len(groups):
+            _ppt_add_text(slide, 0.65, 6.65, 12.0, 0.45, spec["footer"],
+                          size=24, color="666666")
 
 
 def make_classroom_pptx(questions: List[Question], year: int, title_suffix: str,
                         template_kind="自訂簡版", booklet_no=""):
+    """PPTX contains the same content as formal teacher edition.
+
+    No summaries or invented content. Existing tables become real PPT tables;
+    source images remain images. Text is split across slides instead of shrunk.
+    """
     selected = [q for q in questions if q.selected]
     prs = Presentation()
     prs.slide_width = PptxInches(13.333)
     prs.slide_height = PptxInches(7.5)
     blank = prs.slide_layouts[6]
 
-    label = "八成以上" if template_kind == "八成以上" else "六成至七成" if template_kind == "六成至七成" else "自訂"
+    label = ("通過率達八成以上" if template_kind == "八成以上"
+             else "通過率達六成至七成" if template_kind == "六成至七成"
+             else (title_suffix or "").strip())
 
     slide = prs.slides.add_slide(blank)
-    _ppt_textbox(slide, 0.55, 0.55, 12.2, 0.7, f"{year}會考國文課堂簡報｜{label} 題本 {booklet_no.strip() or ''}", size=30, bold=True)
-    _ppt_textbox(slide, 0.65, 1.45, 11.5, 0.4, "投影教學版：題目、答案解析、教學重點與課堂筆記", size=16, color="666666")
-    _ppt_textbox(slide, 0.65, 5.95, 11.5, 0.35, f"共 {len(selected)} 題", size=14, color="C24A2E")
+    _ppt_title(slide, f"{year}年會考國文題本-{label}")
+    _ppt_add_text(slide, 0.7, 1.55, 11.9, 1.4,
+                  f"題本{booklet_no.strip() or '自動'}（詳解_教學法）",
+                  size=28, bold=True, color="C24A2E", align=PP_ALIGN.CENTER)
 
     for i, q in enumerate(selected, start=1):
-        # Slide 1: question.
-        slide = prs.slides.add_slide(blank)
-        _ppt_textbox(slide, 0.35, 0.20, 8.0, 0.45, f"第 {i} 題｜{q.category or ''}", size=22, bold=True)
-        meta = f"答案 {q.answer or '—'}｜通過率 {q.pass_rate:.2f}" if q.pass_rate is not None else f"答案 {q.answer or '—'}"
-        _ppt_textbox(slide, 9.1, 0.25, 3.6, 0.35, meta, size=13, bold=True, color="C24A2E", align=PP_ALIGN.RIGHT)
-        content = ""
-        if (q.material or "").strip():
-            content += "【閱讀／共用材料】\n" + _clean_word_text(q.material)[:500] + "\n\n"
-        content += "【題幹】\n" + _clean_word_text(q.text or "") + "\n"
-        for k in ("A","B","C","D"):
-            if (q.options or {}).get(k):
-                content += f"\n({k}) {_clean_word_text(q.options[k])}"
-        _ppt_textbox(slide, 0.45, 0.85, 7.2, 6.15, content[:1500], size=13.5, color="222222", fill="F7F9FC")
-        img = None
-        if getattr(q, "body_crop_png", None):
-            img = q.body_crop_png
-        elif getattr(q, "image_pngs", None):
-            img = q.image_pngs[0] if q.image_pngs else None
-        elif getattr(q, "crop_png", None):
-            img = q.crop_png
-        if img:
-            _ppt_add_image(slide, img, 8.0, 1.0, 4.8, 5.7)
-
-        # Slide 2: explanation.
-        slide = prs.slides.add_slide(blank)
-        _ppt_textbox(slide, 0.35, 0.20, 9.0, 0.45, f"第 {i} 題｜答案與詳解", size=22, bold=True)
-        _ppt_textbox(slide, 10.0, 0.25, 2.8, 0.35, f"答案：{q.answer or '—'}", size=16, bold=True, color="C24A2E", align=PP_ALIGN.RIGHT)
-        if (getattr(q, "translation", "") or "").strip():
-            _ppt_add_lines(slide, 0.55, 0.85, 5.9, 2.25, "語譯", q.translation, max_chars=500)
-            _ppt_add_lines(slide, 6.75, 0.85, 5.9, 5.85, "詳解", q.explanation or "（待補）", max_chars=900)
+        # QUESTION: editable text when formal edition uses text, image when source is image.
+        mode = _effective_render_mode(q)
+        if mode == "整題圖像" and (q.body_crop_png or q.crop_png):
+            slide = prs.slides.add_slide(blank)
+            _ppt_title(slide, f"第 {i} 題｜答案：{q.answer or '—'}")
+            meta = f"{year}年第{q.source_no}題｜通過率：{q.pass_rate:.2f}" if q.pass_rate is not None else f"{year}年第{q.source_no}題"
+            _ppt_add_text(slide, 0.65, 0.88, 12.0, 0.55,
+                          f"{meta}｜能力類型：{q.category or '—'}",
+                          size=24, bold=True, color="566573")
+            _ppt_place_image(slide, q.body_crop_png or q.crop_png, 0.8, 1.55, 11.7, 5.35)
         else:
-            _ppt_add_lines(slide, 0.55, 0.85, 12.1, 5.85, "詳解", q.explanation or "（待補）", max_chars=1200)
+            question_text = ""
+            if (q.material or "").strip() and not (q.group_id or "").strip():
+                question_text += _clean_word_text(q.material) + "\n\n"
+            question_text += _clean_word_text(q.text or "")
+            for k in ("A","B","C","D"):
+                if (q.options or {}).get(k):
+                    question_text += f"\n({k}) {_clean_word_text(q.options[k])}"
+            qchunks = _ppt_chunks(question_text, 250)
+            imgs = list(q.image_pngs or []) if q.include_image else []
+            for ci, chunk in enumerate(qchunks, start=1):
+                slide = prs.slides.add_slide(blank)
+                suffix = f"（{ci}/{len(qchunks)}）" if len(qchunks) > 1 else ""
+                _ppt_title(slide, f"第 {i} 題{suffix}｜答案：{q.answer or '—'}")
+                meta = f"{year}年第{q.source_no}題｜通過率：{q.pass_rate:.2f}" if q.pass_rate is not None else f"{year}年第{q.source_no}題"
+                _ppt_add_text(slide, 0.65, 0.88, 12.0, 0.55,
+                              f"{meta}｜能力類型：{q.category or '—'}",
+                              size=24, bold=True, color="566573")
+                if imgs and ci == 1:
+                    _ppt_add_text(slide, 0.6, 1.55, 7.0, 5.35, chunk,
+                                  size=24, color="222222", fill="F7F9FC")
+                    _ppt_place_image(slide, imgs[0], 7.9, 1.55, 4.8, 5.35)
+                else:
+                    _ppt_add_text(slide, 0.6, 1.55, 12.1, 5.35, chunk,
+                                  size=24, color="222222", fill="F7F9FC")
+            # Additional source images get their own image slide, preserving content.
+            for extra_i, data in enumerate(imgs[1:], start=2):
+                slide = prs.slides.add_slide(blank)
+                _ppt_title(slide, f"第 {i} 題｜原題圖片 {extra_i}")
+                _ppt_place_image(slide, data, 0.8, 1.1, 11.7, 5.9)
 
-        # Slide 3: teaching + notes.
-        slide = prs.slides.add_slide(blank)
-        _ppt_textbox(slide, 0.35, 0.20, 9.0, 0.45, f"第 {i} 題｜教學與筆記", size=22, bold=True)
-        left_body = ""
+        # SAME teacher-edition fields, in the same logical order.
+        _ppt_add_body_slides(prs, blank, f"第 {i} 題｜解析",
+                              q.explanation or "（待補）", "FFF8F6")
         if (q.teaching_focus or "").strip():
-            left_body += "【教學重點】\n" + q.teaching_focus + "\n\n"
-        left_body += "【教學步驟】\n" + (q.teaching or "（待補）")
-        _ppt_add_lines(slide, 0.55, 0.85, 5.85, 5.85, "教學設計", left_body, max_chars=900)
-        notes = ""
+            _ppt_add_body_slides(prs, blank, f"第 {i} 題｜教學重點",
+                                  q.teaching_focus, "F8FCF7")
+        _ppt_add_body_slides(prs, blank, f"第 {i} 題｜教學步驟",
+                              q.teaching or "（待補）", "F8FCF7")
         if (q.note_strategy or "").strip():
-            notes += "【筆記策略】\n" + q.note_strategy + "\n\n"
-        table_text = _ppt_note_table_text(q.note_strategy_table_json)
-        if table_text:
-            notes += "【課堂筆記】\n" + table_text
-        if not notes.strip():
-            notes = "本題不另設語文筆記。"
-        _ppt_add_lines(slide, 6.75, 0.85, 5.85, 5.85, "課堂筆記", notes, max_chars=900)
+            _ppt_add_body_slides(prs, blank, f"第 {i} 題｜筆記策略",
+                                  q.note_strategy, "FAF9FC")
+        _ppt_add_real_table(prs, blank, f"第 {i} 題｜筆記", q.note_strategy_table_json)
 
     out = io.BytesIO()
     prs.save(out)
@@ -5840,7 +5888,7 @@ def _load_annual_project_zip(zip_bytes: bytes):
                 }
         st.session_state.project_sources = restored_sources
 
-        # v6.18.0: universal project compatibility pass.
+        # v6.18.1: universal project compatibility pass.
         # Original annual sources bundled in the ZIP are used only to UPGRADE
         # weak/misaligned publisher reference blocks. Existing good blocks and
         # all teacher-edited Question fields remain untouched.
@@ -7453,7 +7501,7 @@ with output_tab:
                     _missing.append("教師版")
                 st.error(
                     "缺少正式 Word 範本：" + "、".join(_missing) +
-                    "。請使用 v6.18.0 完整 ZIP 執行；若只單獨放 app.py，"
+                    "。請使用 v6.18.1 完整 ZIP 執行；若只單獨放 app.py，"
                     "必須把四份 template_*.docx 放在 app.py 同一資料夾。"
                 )
         booklet_no = st.text_input(
@@ -7570,8 +7618,8 @@ with output_tab:
         st.divider()
         st.markdown("#### 進階匯出")
         st.caption(
-            "以下是新增選項，不取代上方正式學生版／教師版。"
-            "質感版 DOCX 與課堂 PPTX 都讀取同一份正式編輯內容；一般文字與表格仍可複製、可編輯。"
+            "以下兩種輸出與目前教師版使用完全相同的內容，不新增摘要或其他文字，只改呈現方式。"
+            "質感版強化外框與欄位辨識；PPT 標題至少36pt、內文至少24pt，表格維持表格、圖片維持圖片。"
         )
         adv1, adv2 = st.columns(2)
         with adv1:
