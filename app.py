@@ -9,6 +9,7 @@ import json
 import zipfile
 import tempfile
 import textwrap
+import copy
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
 
@@ -29,7 +30,7 @@ from pptx.dml.color import RGBColor as PptxRGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 
-APP_VERSION = "Web v6.18.3 單色系質感版／穩定分頁"
+APP_VERSION = "Web v6.18.8 文言語譯教師版修正版"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -1042,12 +1043,23 @@ def _add_legacy_teacher_box(doc, q: Question):
     cell = table.cell(0, 0)
     _set_cell_margins(cell, top=0, start=108, bottom=0, end=108)
 
-    # Clear the default paragraph cleanly and reuse it for the first label.
+    # Clear the default paragraph.  文言題依既有資料先輸出語譯，再輸出解析；
+    # 非文言題則直接從解析開始。只使用既有 q.translation，不生成任何新文字。
     p0 = cell.paragraphs[0]
     p0.text = ""
     _set_body_paragraph_format(p0, before=1.2, after=0)
-    r = p0.add_run("解析：")
-    _set_run_word_style(r, font="標楷體", size=12, color=RGBColor(255, 0, 0), bold=False)
+
+    if (getattr(q, "translation", "") or "").strip():
+        r = p0.add_run("【語譯】：")
+        _set_run_word_style(r, font="標楷體", size=12, color=RGBColor(255, 0, 0), bold=False)
+        _add_red_multiline(cell, q.translation)
+        _add_red_paragraph(cell, "", label=False)
+        _add_red_paragraph(cell, "解析：", label=True)
+    else:
+        r = p0.add_run("解析：")
+        _set_run_word_style(r, font="標楷體", size=12, color=RGBColor(255, 0, 0), bold=False)
+
+    # 解析正文不可遺漏。
     _add_red_multiline(cell, q.explanation or "（待補）")
 
     if (q.teaching_focus or "").strip():
@@ -1995,10 +2007,30 @@ def _formal_booklet_filename(year: int, template_kind: str, booklet_no: str, tea
 
 # -----------------------------
 # Premium teacher handbook / classroom slides export
-# v6.18.3: SAME CONTENT as the current formal teacher edition.
-# Only presentation changes. No summary/index/extra explanatory prose is added.
 # -----------------------------
-def _quality_set_run(run, size=11, bold=False, color="222222", font="Microsoft JhengHei"):
+# v6.18.8: the premium DOCX is NOT a second content model.
+# It mirrors the formal teacher edition's content/order/conditional blocks (including 文言語譯) and
+# changes only typography, spacing, colors, borders and pagination behavior.
+
+# Reading / Humanities theme — low-saturation Sage Green.
+# Premium export only. Formal student/teacher exports do not use these constants.
+QUALITY = {
+    "primary": "708C78",       # 閱讀主色
+    "dark": "405B49",          # 深森林灰綠
+    "secondary": "94AA99",     # 柔和灰綠
+    "light": "DDE8DF",         # 淡鼠尾草綠
+    "pale": "F3F7F2",          # 極淡紙感綠
+    "body": "303431",          # 溫炭墨
+    "muted": "667069",         # 次要資訊
+    "border": "C8D5CA",        # 細線
+    "paper": "FFFDF9",         # 紙感暖白（實際頁面維持白／近白）
+    # aliases used by older premium helpers
+    "title": "405B49",
+    "heading_fill": "DDE8DF",
+    "soft_fill": "F3F7F2",
+}
+
+def _quality_set_run(run, size=11, bold=False, color=None, font="Microsoft JhengHei"):
     run.font.name = font
     try:
         run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
@@ -2006,539 +2038,992 @@ def _quality_set_run(run, size=11, bold=False, color="222222", font="Microsoft J
         pass
     run.font.size = Pt(size)
     run.bold = bold
-    if color:
-        run.font.color.rgb = RGBColor.from_string(color)
+    run.font.color.rgb = RGBColor.from_string(color or QUALITY["body"])
 
 
-# v6.18.3 monochrome palette: one blue-grey base, differentiated by tone only.
-Q_BASE = "334A62"       # main deep blue-grey
-Q_LINE = "8191A1"       # border
-Q_META_1 = "DCE5EE"     # darkest pale tint
-Q_META_2 = "E5EBF1"
-Q_META_3 = "EDF1F5"
-Q_META_4 = "F3F5F7"     # lightest tint
-Q_BODY = "FFFFFF"
-Q_SOFT = "F7F9FB"
-Q_TEXT = "202832"
-Q_MUTED = "5D6874"
+def _quality_keep(p, with_next=False, together=False):
+    p.paragraph_format.keep_with_next = with_next
+    p.paragraph_format.keep_together = together
+    try:
+        p.paragraph_format.widow_control = True
+    except Exception:
+        pass
 
 
-def _quality_set_table_borders(table, color=Q_LINE, size="8"):
-    tblPr = table._tbl.tblPr
-    old = tblPr.first_child_found_in("w:tblBorders")
-    if old is not None:
-        tblPr.remove(old)
-    borders = OxmlElement("w:tblBorders")
-    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        el = OxmlElement(f"w:{edge}")
-        el.set(qn("w:val"), "single")
-        el.set(qn("w:sz"), size)
-        el.set(qn("w:color"), color)
-        borders.append(el)
-    tblPr.append(borders)
-
-
-def _quality_no_split_row(row):
-    trPr = row._tr.get_or_add_trPr()
-    cant = OxmlElement("w:cantSplit")
-    trPr.append(cant)
-
-
-def _quality_cell(cell, text="", fill=Q_BODY, size=10.5, bold=False,
-                  color=Q_TEXT, align=WD_ALIGN_PARAGRAPH.LEFT,
-                  top=70, bottom=70, start=100, end=100):
-    cell.text = ""
-    set_cell_shading(cell, fill)
-    _set_cell_margins(cell, top=top, bottom=bottom, start=start, end=end)
-    p = cell.paragraphs[0]
-    p.alignment = align
-    p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(0)
-    p.paragraph_format.line_spacing = 1.05
+def _quality_para(container, text="", size=11, bold=False, color=None,
+                  before=0, after=3, left=0, first=0, hanging=0,
+                  align=None, keep_next=False, keep_together=False):
+    p = container.add_paragraph()
+    p.paragraph_format.space_before = Pt(before)
+    p.paragraph_format.space_after = Pt(after)
+    p.paragraph_format.line_spacing = 1.12
+    if left:
+        p.paragraph_format.left_indent = Cm(left)
+    if first:
+        p.paragraph_format.first_line_indent = Cm(first)
+    if hanging:
+        p.paragraph_format.first_line_indent = Cm(-hanging)
+        p.paragraph_format.left_indent = Cm(left + hanging)
+    if align is not None:
+        p.alignment = align
+    _quality_keep(p, keep_next, keep_together)
     r = p.add_run(_clean_word_text(text or ""))
     _quality_set_run(r, size=size, bold=bold, color=color)
     return p
 
 
-def _quality_meta_table(doc, q, display_no, year):
-    """One restrained blue-grey information bar."""
-    tbl = doc.add_table(rows=1, cols=4)
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tbl.autofit = False
-    vals = [
-        f"第 {display_no} 題",
-        f"答案：{q.answer or '—'}",
-        f"{year}年第{q.source_no}題｜通過率：{q.pass_rate:.2f}" if q.pass_rate is not None
-        else f"{year}年第{q.source_no}題｜通過率：—",
-        f"能力類型：{q.category or '—'}",
-    ]
-    widths = [2.4, 2.6, 5.3, 6.1]
-    fills = [Q_META_1, Q_META_2, Q_META_3, Q_META_4]
-    for i, (v, w) in enumerate(zip(vals, widths)):
-        c = tbl.cell(0, i)
-        c.width = Cm(w)
-        try:
-            tbl.columns[i].width = Cm(w)
-        except Exception:
-            pass
-        _quality_cell(c, v, fill=fills[i], size=9.7, bold=True,
-                      color=Q_BASE, align=WD_ALIGN_PARAGRAPH.CENTER,
-                      top=60, bottom=60, start=45, end=45)
-    _quality_set_table_borders(tbl, color=Q_LINE, size="8")
-    _quality_no_split_row(tbl.rows[0])
-    return tbl
-
-
-def _quality_question_content_table(doc, q):
-    """Full-width question card; source visual remains image."""
-    tbl = doc.add_table(rows=1, cols=1)
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tbl.autofit = False
-    c = tbl.cell(0, 0)
-    c.width = Cm(16.4)
-    try:
-        tbl.columns[0].width = Cm(16.4)
-    except Exception:
-        pass
-    _quality_set_table_borders(tbl, color=Q_LINE, size="8")
-    _set_cell_margins(c, top=105, bottom=105, start=140, end=140)
-    set_cell_shading(c, Q_BODY)
-    c.text = ""
-
-    first = True
-    if (q.material or "").strip() and not (q.group_id or "").strip():
-        p = c.paragraphs[0]
-        p.paragraph_format.space_after = Pt(4)
-        p.paragraph_format.line_spacing = 1.08
-        r = p.add_run(_clean_word_text(q.material))
-        _quality_set_run(r, size=10.7, color=Q_MUTED)
-        first = False
-
-    p = c.paragraphs[0] if first else c.add_paragraph()
-    p.paragraph_format.space_after = Pt(3)
-    p.paragraph_format.line_spacing = 1.08
-    r = p.add_run(_clean_word_text(q.text or ""))
-    _quality_set_run(r, size=11.1, color=Q_TEXT)
-
-    imgs = []
-    if getattr(q, "body_crop_png", None) and _effective_render_mode(q) == "整題圖像":
-        imgs = [q.body_crop_png]
-    elif getattr(q, "image_pngs", None) and q.include_image:
-        imgs = list(q.image_pngs or [])
-    for data in imgs:
-        p = c.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        try:
-            im = Image.open(io.BytesIO(data))
-            w, h = im.size
-            p.add_run().add_picture(io.BytesIO(data), width=Cm(12.8 if w >= h else 8.6))
-        except Exception:
-            pass
-
-    if _effective_render_mode(q) != "整題圖像":
-        for k in ("A", "B", "C", "D"):
-            val = (q.options or {}).get(k, "")
-            if val:
-                p = c.add_paragraph()
-                p.paragraph_format.left_indent = Cm(0.2)
-                p.paragraph_format.space_after = Pt(1)
-                p.paragraph_format.line_spacing = 1.05
-                r = p.add_run(f"({k}) {_clean_word_text(val)}")
-                _quality_set_run(r, size=10.7, color=Q_TEXT)
-    return tbl
-
-
-def _quality_teacher_field(doc, label, body, tone=1):
-    """One-cell card. Header and content live in the SAME cell.
-
-    This is much more stable across Word page breaks than a two-row table:
-    the colored label cannot be stranded on one page while its body jumps
-    to the next page. Long bodies may flow naturally across pages.
-    """
-    if not (body or "").strip():
-        return None
-    fills = [Q_META_1, Q_META_2, Q_META_3, Q_META_4]
-    header_fill = fills[max(0, min(3, tone))]
-    tbl = doc.add_table(rows=1, cols=1)
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tbl.autofit = False
-    c = tbl.cell(0, 0)
-    c.width = Cm(16.4)
-    try:
-        tbl.columns[0].width = Cm(16.4)
-    except Exception:
-        pass
-    _quality_set_table_borders(tbl, color=Q_LINE, size="8")
-    _set_cell_margins(c, top=0, bottom=90, start=125, end=125)
-    set_cell_shading(c, Q_BODY)
-    c.text = ""
-
-    # Header is a shaded paragraph inside the same card.
-    hp = c.paragraphs[0]
-    hp.paragraph_format.space_before = Pt(0)
-    hp.paragraph_format.space_after = Pt(5)
-    hp.paragraph_format.keep_with_next = True
-    hp.paragraph_format.line_spacing = 1.0
-    pPr = hp._p.get_or_add_pPr()
-    shd = OxmlElement("w:shd")
-    shd.set(qn("w:fill"), header_fill)
-    pPr.append(shd)
-    r = hp.add_run(f"  {label}")
-    _quality_set_run(r, size=10.5, bold=True, color=Q_BASE)
-
-    lines = _clean_word_text(body).splitlines() or [""]
-    for i, line in enumerate(lines):
-        p = c.add_paragraph()
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(1.5)
-        p.paragraph_format.line_spacing = 1.08
-        if i == 0:
-            # Keep header + first content paragraph together.
-            p.paragraph_format.keep_with_next = False
-        r = p.add_run(line)
-        _quality_set_run(r, size=10.5, color=Q_TEXT)
-    return tbl
-
-
-def _quality_note_table(doc, raw):
-    spec = _parse_note_strategy_table(_normalize_language_note_table(raw or ""))
-    if not spec:
-        return False
-
-    # Heading and actual table use same monochrome family.
-    head = doc.add_table(rows=1, cols=1)
-    head.alignment = WD_TABLE_ALIGNMENT.CENTER
-    head.autofit = False
-    c = head.cell(0, 0)
-    c.width = Cm(16.4)
-    try:
-        head.columns[0].width = Cm(16.4)
-    except Exception:
-        pass
-    _quality_set_table_borders(head, color=Q_LINE, size="8")
-    title = "筆記"
-    if spec.get("title"):
-        title += f"｜{spec['title']}"
-    _quality_cell(c, title, fill=Q_META_3, size=10.5, bold=True,
-                  color=Q_BASE, top=55, bottom=55, start=115, end=115)
-    _quality_no_split_row(head.rows[0])
-
-    tbl = doc.add_table(rows=1, cols=len(spec["columns"]))
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tbl.autofit = True
-    _quality_set_table_borders(tbl, color=Q_LINE, size="8")
-    for j, col in enumerate(spec["columns"]):
-        _quality_cell(tbl.cell(0, j), col, fill=Q_META_1, size=10.2,
-                      bold=True, color=Q_BASE,
-                      align=WD_ALIGN_PARAGRAPH.CENTER,
-                      top=58, bottom=58, start=65, end=65)
-    _quality_no_split_row(tbl.rows[0])
-
-    for ri, row in enumerate(spec["rows"], start=1):
-        cells = tbl.add_row().cells
-        fill = Q_BODY if ri % 2 else Q_SOFT
-        for j, val in enumerate(row):
-            _quality_cell(cells[j], val, fill=fill, size=10.0,
-                          top=62, bottom=62, start=70, end=70)
-        # Only short data rows are protected; long rows are allowed to flow.
-        if sum(len(str(x)) for x in row) < 220:
-            _quality_no_split_row(tbl.rows[-1])
-
-    if spec.get("footer"):
-        _quality_teacher_field(doc, "備註", spec["footer"], tone=3)
-    return True
-
-
-def _quality_gap(doc, pts=3):
-    p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(pts)
-    p.paragraph_format.line_spacing = 0.6
-    return p
-
-
-def _quality_page_separator(doc):
-    p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(2)
-    p.paragraph_format.space_after = Pt(4)
+def _quality_section_title(doc, text):
+    p = _quality_para(doc, text, size=14.5, bold=True, color=QUALITY["title"],
+                      before=7, after=5, keep_next=True)
+    # A thin rule, not a card.
     pPr = p._p.get_or_add_pPr()
     pbdr = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
     bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "8")
-    bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), Q_LINE)
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "2")
+    bottom.set(qn("w:color"), QUALITY["secondary"])
     pbdr.append(bottom)
     pPr.append(pbdr)
+    return p
 
 
-def make_quality_teacher_handbook_docx(questions: List[Question], year: int, title_suffix: str,
-                                       template_kind="自訂簡版", booklet_no=""):
-    """Monochrome premium layout; same teacher-edition content."""
-    selected = [q for q in questions if q.selected]
-    doc = Document()
+def _quality_block_heading(doc, title):
+    # Compact pale heading strip only; body remains white.
+    tbl = doc.add_table(rows=1, cols=1)
+    tbl.alignment = WD_TABLE_ALIGNMENT.LEFT
+    tbl.autofit = False
+    try:
+        tbl.columns[0].width = Cm(16.4)
+    except Exception:
+        pass
+    cell = tbl.cell(0, 0)
+    cell.text = ""
+    _set_cell_margins(cell, top=55, bottom=55, start=110, end=90)
+    set_cell_shading(cell, QUALITY["heading_fill"])
+    # Remove heavy box and retain only a very light lower rule.
+    _remove_table_borders(tbl)
+    p = cell.paragraphs[0]
+    _quality_keep(p, with_next=True)
+    r = p.add_run(title)
+    _quality_set_run(r, size=11.2, bold=True, color=QUALITY["title"])
+    return tbl
+
+
+def _quality_add_body_lines(doc, body, numbered=False):
+    body = _clean_word_text(body or "")
+    if not body.strip():
+        return
+    for raw in body.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        # Preserve original wording; only infer indentation from existing numbering.
+        if re.match(r"^\s*\(\d+\)", line):
+            _quality_para(doc, line.strip(), size=10.7, color=QUALITY["body"],
+                          before=0, after=2, left=0.45, hanging=0.45)
+        elif re.match(r"^\s*\d+[.、]", line):
+            _quality_para(doc, line.strip(), size=10.7, color=QUALITY["body"],
+                          before=3 if numbered else 1, after=2, left=0.05, hanging=0.48)
+        elif re.match(r"^\s*\([A-DＡ-Ｄ]\)", line, flags=re.I):
+            _quality_para(doc, line.strip(), size=10.7, color=QUALITY["body"],
+                          before=1, after=2, left=0.10, hanging=0.55)
+        else:
+            _quality_para(doc, line, size=10.7, color=QUALITY["body"],
+                          before=0, after=2)
+
+
+def _quality_add_existing_block(doc, title, body, numbered=False):
+    if not (body or "").strip():
+        return False
+    _quality_block_heading(doc, title)
+    _quality_add_body_lines(doc, body, numbered=numbered)
+    return True
+
+
+def _quality_add_question_meta(doc, q, display_no, year):
+    # No thick badge table: a quiet single line of secondary information.
+    p = _quality_para(doc, "", size=9.4, color=QUALITY["muted"], before=0, after=5, keep_next=True)
+    parts = [f"{year}會考第{q.source_no}題"]
+    if q.pass_rate is not None:
+        parts.append(f"通過率 {q.pass_rate:.2f}")
+    if (q.category or "").strip():
+        parts.append(q.category.strip())
+    r = p.add_run("　｜　".join(parts))
+    _quality_set_run(r, size=9.4, color=QUALITY["muted"])
+    return p
+
+
+def _quality_add_question_text(doc, q, display_no, show_material=True):
+    p = _quality_para(doc, f"{display_no}.", size=13.2, bold=True, color=QUALITY["title"],
+                      before=5, after=2, keep_next=True)
+    if show_material and (q.material or "").strip():
+        # Shared/group material stays in its original relation; white background.
+        _quality_para(doc, q.material, size=10.8, color=QUALITY["body"],
+                      before=2, after=5, keep_together=False)
+
+    # Question stem.
+    _quality_para(doc, q.text or "", size=11.3, color=QUALITY["body"],
+                  before=0, after=4, keep_together=False)
+
+    # Options: editable text, aligned with hanging indent.
+    for k in ("A", "B", "C", "D"):
+        val = (q.options or {}).get(k, "")
+        if val:
+            _quality_para(doc, f"({k}) {val}", size=10.9, color=QUALITY["body"],
+                          before=0, after=2.2, left=0.05, hanging=0.58)
+
+    # Preserve source visual without crop/stretch.
+    img = None
+    if getattr(q, "body_crop_png", None):
+        img = q.body_crop_png
+    elif getattr(q, "image_pngs", None):
+        img = q.image_pngs[0] if q.image_pngs else None
+    elif getattr(q, "crop_png", None) and _effective_render_mode(q) == "整題圖像":
+        img = q.crop_png
+    if img:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(4)
+        p.paragraph_format.space_after = Pt(5)
+        _quality_keep(p, together=True)
+        try:
+            p.add_run().add_picture(io.BytesIO(img), width=Cm(12.8))
+        except Exception:
+            pass
+
+    # Teacher answer, matching formal teacher edition content without adding a card.
+    if (q.answer or "").strip():
+        p = _quality_para(doc, f"答案：{q.answer}", size=10.6, bold=True,
+                          color=QUALITY["title"], before=2, after=5, keep_next=True)
+    return True
+
+
+def _quality_add_note_table(doc, raw):
+    spec = _parse_note_strategy_table(_normalize_language_note_table(raw or ""))
+    if not spec:
+        return False
+    if spec.get("title"):
+        _quality_para(doc, spec["title"], size=10.6, bold=True,
+                      color=QUALITY["title"], before=2, after=3, keep_next=True)
+    tbl = doc.add_table(rows=1, cols=len(spec["columns"]))
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tbl.autofit = True
+    tbl.style = "Table Grid"
+    for j, col in enumerate(spec["columns"]):
+        c = tbl.cell(0, j)
+        c.text = ""
+        _set_cell_margins(c, top=90, bottom=90, start=100, end=100)
+        set_cell_shading(c, QUALITY["heading_fill"])
+        p = c.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _quality_keep(p, with_next=True)
+        r = p.add_run(_clean_word_text(col))
+        _quality_set_run(r, size=10.2, bold=True, color=QUALITY["title"])
+    for row in spec["rows"]:
+        cells = tbl.add_row().cells
+        for j, val in enumerate(row):
+            c = cells[j]
+            c.text = ""
+            _set_cell_margins(c, top=85, bottom=85, start=100, end=100)
+            set_cell_shading(c, QUALITY["paper"])
+            p = c.paragraphs[0]
+            r = p.add_run(_clean_word_text(val))
+            _quality_set_run(r, size=10.1, color=QUALITY["body"])
+    # Recolor grid lines to soft blue-gray.
+    tblPr = tbl._tbl.tblPr
+    borders = tblPr.first_child_found_in("w:tblBorders")
+    if borders is not None:
+        for edge in borders:
+            edge.set(qn("w:color"), QUALITY["border"])
+            edge.set(qn("w:sz"), "4")
+    if spec.get("footer"):
+        _quality_para(doc, spec["footer"], size=9.8, color=QUALITY["muted"], before=2, after=4)
+    return True
+
+
+def _quality_setup_doc(doc):
     sec = doc.sections[0]
-    sec.page_width, sec.page_height = Cm(21), Cm(29.7)
-    sec.top_margin, sec.bottom_margin = Cm(1.2), Cm(1.15)
-    sec.left_margin, sec.right_margin = Cm(1.3), Cm(1.3)
+    sec.page_width = Cm(21)
+    sec.page_height = Cm(29.7)
+    sec.top_margin = Cm(1.55)
+    sec.bottom_margin = Cm(1.45)
+    sec.left_margin = Cm(1.65)
+    sec.right_margin = Cm(1.65)
 
     normal = doc.styles["Normal"]
     normal.font.name = "Microsoft JhengHei"
     normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft JhengHei")
-    normal.font.size = Pt(10.5)
+    normal.font.size = Pt(10.7)
+    normal.font.color.rgb = RGBColor.from_string(QUALITY["body"])
+    normal.paragraph_format.line_spacing = 1.12
+    normal.paragraph_format.space_after = Pt(2)
 
-    label = ("通過率達八成以上" if template_kind == "八成以上"
-             else "通過率達六成至七成" if template_kind == "六成至七成"
-             else (title_suffix or "").strip())
-    p = doc.add_paragraph()
+    # Footer: only a quiet page number if the source/export already uses page structure.
+    footer = sec.footer
+    p = footer.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(7)
-    r = p.add_run(f"{year}年會考國文題本-{label}-題本{booklet_no.strip() or '自動'}（詳解_教學法）")
-    _quality_set_run(r, size=17, bold=True, color=Q_BASE)
+    p.text = ""
+    r = p.add_run()
+    fldChar1 = OxmlElement("w:fldChar"); fldChar1.set(qn("w:fldCharType"), "begin")
+    instrText = OxmlElement("w:instrText"); instrText.set(qn("xml:space"), "preserve"); instrText.text = " PAGE "
+    fldChar2 = OxmlElement("w:fldChar"); fldChar2.set(qn("w:fldCharType"), "end")
+    r._r.append(fldChar1); r._r.append(instrText); r._r.append(fldChar2)
+    _quality_set_run(r, size=9, color=QUALITY["muted"])
 
-    for i, q in enumerate(selected, start=1):
-        _quality_meta_table(doc, q, i, year)
-        _quality_question_content_table(doc, q)
-        _quality_gap(doc, 2)
 
-        # Same content as formal teacher edition; tones are all one hue family.
-        _quality_teacher_field(doc, "解析", q.explanation or "（待補）", tone=0)
-        if (q.teaching_focus or "").strip():
-            _quality_gap(doc, 1)
-            _quality_teacher_field(doc, "教學重點", q.teaching_focus, tone=1)
-        _quality_gap(doc, 1)
-        _quality_teacher_field(doc, "教學步驟", q.teaching or "（待補）", tone=2)
-        if (q.note_strategy or "").strip():
-            _quality_gap(doc, 1)
-            _quality_teacher_field(doc, "筆記策略", q.note_strategy, tone=3)
-        if (q.note_strategy_table_json or "").strip():
-            _quality_gap(doc, 1)
-            _quality_note_table(doc, q.note_strategy_table_json)
+def _reading_set_cell_border(cell, **edges):
+    """Set only requested cell borders; values are OOXML dicts."""
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcBorders = tcPr.first_child_found_in("w:tcBorders")
+    if tcBorders is None:
+        tcBorders = OxmlElement("w:tcBorders")
+        tcPr.append(tcBorders)
+    for edge_name, edge_data in edges.items():
+        tag = f"w:{edge_name}"
+        edge = tcBorders.find(qn(tag))
+        if edge is None:
+            edge = OxmlElement(tag)
+            tcBorders.append(edge)
+        for key, value in edge_data.items():
+            edge.set(qn(f"w:{key}"), str(value))
 
-        if i != len(selected):
-            _quality_page_separator(doc)
 
+def _reading_set_paragraph_border(p, left=None, top=None, bottom=None):
+    pPr = p._p.get_or_add_pPr()
+    pBdr = pPr.find(qn("w:pBdr"))
+    if pBdr is None:
+        pBdr = OxmlElement("w:pBdr")
+        pPr.append(pBdr)
+    for name, spec in (("left", left), ("top", top), ("bottom", bottom)):
+        if not spec:
+            continue
+        el = pBdr.find(qn(f"w:{name}"))
+        if el is None:
+            el = OxmlElement(f"w:{name}")
+            pBdr.append(el)
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), str(spec.get("sz", 4)))
+        el.set(qn("w:space"), str(spec.get("space", 2)))
+        el.set(qn("w:color"), spec.get("color", QUALITY["border"]))
+
+
+def _reading_set_paragraph_shading(p, fill):
+    pPr = p._p.get_or_add_pPr()
+    shd = pPr.find(qn("w:shd"))
+    if shd is None:
+        shd = OxmlElement("w:shd")
+        pPr.append(shd)
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill)
+
+
+def _reading_clear_run_fill(run):
+    """Remove formal-edition highlight/shading so premium stays sage-only."""
+    try:
+        run.font.highlight_color = None
+    except Exception:
+        pass
+    try:
+        rPr = run._element.get_or_add_rPr()
+        shd = rPr.find(qn("w:shd"))
+        if shd is not None:
+            rPr.remove(shd)
+        highlight = rPr.find(qn("w:highlight"))
+        if highlight is not None:
+            rPr.remove(highlight)
+    except Exception:
+        pass
+
+
+def _reading_style_run(run, size=None, bold=None, color=None):
+    _reading_clear_run_fill(run)
+    run.font.name = "Microsoft JhengHei"
+    try:
+        rPr = run._element.get_or_add_rPr()
+        rFonts = rPr.rFonts
+        if rFonts is None:
+            rFonts = OxmlElement("w:rFonts")
+            rPr.insert(0, rFonts)
+        for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
+            rFonts.set(qn(f"w:{attr}"), "Microsoft JhengHei")
+    except Exception:
+        pass
+    if size is not None:
+        run.font.size = Pt(size)
+    if bold is not None:
+        run.bold = bold
+    if color:
+        run.font.color.rgb = RGBColor.from_string(color)
+
+
+def _reading_style_all_runs(p, size=10.7, color=None, bold=None):
+    for r in p.runs:
+        _reading_style_run(r, size=size, color=color or QUALITY["body"], bold=bold)
+
+
+def _reading_keep(p, with_next=False, together=False):
+    p.paragraph_format.keep_with_next = with_next
+    p.paragraph_format.keep_together = together
+    try:
+        p.paragraph_format.widow_control = True
+    except Exception:
+        pass
+
+
+def _reading_is_question_start(text):
+    s = (text or "").strip()
+    return bool(re.match(r"^[（(]\s*[A-DＡ-Ｄ]\s*[）)]\s*\d+\s*[.．、]", s))
+
+
+def _reading_is_option(text):
+    return bool(re.match(r"^\s*\([A-DＡ-Ｄ]\)\s*", text or ""))
+
+
+def _reading_is_group_prompt(text):
+    s = (text or "").strip()
+    return s.startswith("請閱讀以下") or ("請閱讀" in s and "回答" in s)
+
+
+def _reading_is_section(text):
+    s = (text or "").strip()
+    return s.startswith("壹、") or s.startswith("貳、") or s.startswith("參、")
+
+
+def _reading_style_section_paragraph(p):
+    p.paragraph_format.space_before = Pt(15)
+    p.paragraph_format.space_after = Pt(8)
+    p.paragraph_format.line_spacing = 1.0
+    _reading_keep(p, with_next=True)
+    _reading_style_all_runs(p, size=15.5, color=QUALITY["dark"], bold=True)
+    _reading_set_paragraph_border(
+        p,
+        bottom={"sz": 6, "space": 4, "color": QUALITY["secondary"]}
+    )
+
+
+def _reading_style_question_header_paragraph(p):
+    # Clear "new question" signal: pale paper strip + 3–4 pt sage left rail,
+    # plus thin top divider. No complete rectangle/card.
+    p.paragraph_format.space_before = Pt(17)
+    p.paragraph_format.space_after = Pt(6)
+    p.paragraph_format.left_indent = Cm(0.18)
+    p.paragraph_format.right_indent = Cm(0.08)
+    p.paragraph_format.first_line_indent = Cm(0)
+    p.paragraph_format.line_spacing = 1.10
+    _reading_keep(p, with_next=True, together=False)
+    _reading_set_paragraph_shading(p, QUALITY["pale"])
+    _reading_set_paragraph_border(
+        p,
+        left={"sz": 24, "space": 6, "color": QUALITY["primary"]},
+        top={"sz": 4, "space": 6, "color": QUALITY["border"]},
+    )
+
+    # Retain all wording. Only change visual hierarchy of existing runs.
+    meta_seen = False
+    for r in p.runs:
+        t = r.text or ""
+        if "115" in t or "會考-" in t or meta_seen:
+            meta_seen = True
+            _reading_style_run(r, size=9.4, color=QUALITY["muted"], bold=False)
+        else:
+            # Answer letter and question prefix have stronger weight.
+            if re.fullmatch(r"\s*[A-DＡ-Ｄ]\s*", t):
+                _reading_style_run(r, size=12.8, color=QUALITY["dark"], bold=True)
+            elif re.search(r"[）)]\s*\d+\s*[.．、]", t):
+                _reading_style_run(r, size=12.8, color=QUALITY["dark"], bold=True)
+            else:
+                _reading_style_run(r, size=11.2, color=QUALITY["body"], bold=False)
+
+
+def _reading_style_question_continuation(p):
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(5)
+    p.paragraph_format.left_indent = Cm(0)
+    p.paragraph_format.first_line_indent = Cm(0)
+    p.paragraph_format.line_spacing = 1.16
+    _reading_keep(p, together=False)
+    # Metadata runs remain quiet; stem remains primary.
+    meta_seen = False
+    for r in p.runs:
+        t = r.text or ""
+        if "115" in t or "會考-" in t or meta_seen:
+            meta_seen = True
+            _reading_style_run(r, size=9.4, color=QUALITY["muted"], bold=False)
+        else:
+            _reading_style_run(r, size=11.2, color=QUALITY["body"], bold=False)
+
+
+def _reading_style_option_paragraph(p, keep_next=False):
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(2.6)
+    p.paragraph_format.line_spacing = 1.14
+    p.paragraph_format.left_indent = Cm(0.62)
+    p.paragraph_format.first_line_indent = Cm(-0.62)
+    _reading_keep(p, with_next=keep_next, together=False)
+    _reading_style_all_runs(p, size=10.7, color=QUALITY["body"], bold=False)
+
+
+def _reading_style_group_prompt(p):
+    p.paragraph_format.space_before = Pt(10)
+    p.paragraph_format.space_after = Pt(5)
+    p.paragraph_format.line_spacing = 1.08
+    _reading_keep(p, with_next=True)
+    _reading_style_all_runs(p, size=10.8, color=QUALITY["dark"], bold=True)
+    _reading_set_paragraph_border(
+        p,
+        bottom={"sz": 4, "space": 3, "color": QUALITY["border"]}
+    )
+
+
+def _reading_style_regular_paragraph(p):
+    p.paragraph_format.line_spacing = 1.15
+    p.paragraph_format.space_after = Pt(2.5)
+    _reading_keep(p, together=False)
+    _reading_style_all_runs(p, size=10.7, color=QUALITY["body"], bold=False)
+
+
+def _reading_teacher_label_kind(text):
+    s = (text or "").strip()
+    if s.startswith("解析：") or s.startswith("【解析】"):
+        return "analysis"
+    if s.startswith("【教學步驟】"):
+        return "teaching"
+    if s.startswith("【筆記策略】"):
+        return "note"
+    if s.startswith("【教學重點】"):
+        return "teaching"
+    if s.startswith("語譯：") or s.startswith("【語譯】"):
+        return "translation"
+    return None
+
+
+def _reading_style_teacher_label(p, kind, low_weight=False):
+    p.paragraph_format.space_before = Pt(7 if kind != "note" else 5)
+    p.paragraph_format.space_after = Pt(4)
+    p.paragraph_format.left_indent = Cm(0.10)
+    p.paragraph_format.first_line_indent = Cm(0)
+    p.paragraph_format.right_indent = Cm(0)
+    p.paragraph_format.line_spacing = 1.0
+    _reading_keep(p, with_next=True)
+
+    if kind == "analysis":
+        _reading_set_paragraph_shading(p, QUALITY["light"])
+        _reading_set_paragraph_border(
+            p, left={"sz": 18, "space": 5, "color": QUALITY["primary"]}
+        )
+        _reading_style_all_runs(p, size=11.1, color=QUALITY["dark"], bold=True)
+    elif kind == "translation":
+        # 文言語譯：屬於教師閱讀內容，但不搶過解析主標。
+        _reading_set_paragraph_shading(p, QUALITY["pale"])
+        _reading_set_paragraph_border(
+            p, left={"sz": 14, "space": 5, "color": QUALITY["secondary"]}
+        )
+        _reading_style_all_runs(p, size=10.9, color=QUALITY["dark"], bold=True)
+    elif kind == "teaching":
+        # White background + softer left rail; visually distinct from analysis.
+        _reading_set_paragraph_border(
+            p,
+            left={"sz": 14, "space": 5, "color": QUALITY["secondary"]},
+            bottom={"sz": 3, "space": 2, "color": QUALITY["border"]},
+        )
+        _reading_style_all_runs(p, size=11.0, color=QUALITY["dark"], bold=True)
+    else:
+        # Notes are the quietest functional layer.
+        _reading_set_paragraph_shading(p, QUALITY["pale"])
+        _reading_set_paragraph_border(
+            p, bottom={"sz": 3, "space": 2, "color": QUALITY["border"]}
+        )
+        _reading_style_all_runs(
+            p,
+            size=10.6 if low_weight else 10.9,
+            color="526B59",
+            bold=True,
+        )
+
+
+def _reading_style_teacher_body_paragraph(p, current_kind=None):
+    s = (p.text or "").strip()
+    if not s:
+        p.paragraph_format.space_after = Pt(1)
+        return
+    p.paragraph_format.line_spacing = 1.16
+    _reading_keep(p, together=False)
+
+    # Preserve numbering/content; format hierarchy only.
+    if re.match(r"^\d+[.、]", s):
+        p.paragraph_format.space_before = Pt(3.5)
+        p.paragraph_format.space_after = Pt(2.3)
+        p.paragraph_format.left_indent = Cm(0.58)
+        p.paragraph_format.first_line_indent = Cm(-0.58)
+    elif re.match(r"^\(\d+\)", s):
+        p.paragraph_format.space_before = Pt(0.5)
+        p.paragraph_format.space_after = Pt(1.8)
+        p.paragraph_format.left_indent = Cm(1.08)
+        p.paragraph_format.first_line_indent = Cm(-0.55)
+    elif re.match(r"^\([A-DＡ-Ｄ]\)", s):
+        p.paragraph_format.space_before = Pt(1.5)
+        p.paragraph_format.space_after = Pt(2.2)
+        p.paragraph_format.left_indent = Cm(0.60)
+        p.paragraph_format.first_line_indent = Cm(-0.60)
+    else:
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(2.2)
+
+    color = QUALITY["body"]
+    if current_kind == "note" and ("本題不另設語文筆記" in s):
+        color = QUALITY["muted"]
+    _reading_style_all_runs(p, size=10.6, color=color, bold=False)
+
+
+def _reading_style_note_table(tbl):
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tbl.autofit = True
+    # Soft 0.5–0.75 pt sage-gray grid.
+    for ri, row in enumerate(tbl.rows):
+        try:
+            trPr = row._tr.get_or_add_trPr()
+            cant = trPr.find(qn("w:cantSplit"))
+            if cant is None:
+                cant = OxmlElement("w:cantSplit")
+                trPr.append(cant)
+        except Exception:
+            pass
+        for cell in row.cells:
+            _set_cell_margins(cell, top=90, bottom=90, start=105, end=105)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            set_cell_shading(cell, QUALITY["light"] if ri == 0 else "FFFFFF")
+            _reading_set_cell_border(
+                cell,
+                top={"val": "single", "sz": "4", "color": QUALITY["border"]},
+                bottom={"val": "single", "sz": "4", "color": QUALITY["border"]},
+                left={"val": "single", "sz": "4", "color": QUALITY["border"]},
+                right={"val": "single", "sz": "4", "color": QUALITY["border"]},
+            )
+            for p in cell.paragraphs:
+                p.paragraph_format.space_before = Pt(0)
+                p.paragraph_format.space_after = Pt(1)
+                p.paragraph_format.line_spacing = 1.12
+                _reading_keep(p, together=True)
+                _reading_style_all_runs(
+                    p,
+                    size=10.1,
+                    color=QUALITY["dark"] if ri == 0 else QUALITY["body"],
+                    bold=(ri == 0),
+                )
+
+
+def _reading_style_teacher_table(tbl):
+    """Restyle historical teacher box in-place without changing any text."""
+    # Remove the card/box feel from outer teacher container.
+    _remove_table_borders(tbl)
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tbl.autofit = True
+
+    # Historical teacher boxes are often one long table row.  If that row keeps
+    # Word's cantSplit flag, a whole explanation block jumps to the next page and
+    # leaves a large blank area. Premium mode explicitly allows ONLY the outer
+    # teacher row to split; nested note-table rows remain protected.
+    for row in tbl.rows:
+        try:
+            trPr = row._tr.get_or_add_trPr()
+            cant = trPr.find(qn("w:cantSplit"))
+            if cant is not None:
+                trPr.remove(cant)
+        except Exception:
+            pass
+
+    for cell in tbl._cells:
+        _set_cell_margins(cell, top=40, bottom=60, start=80, end=80)
+        set_cell_shading(cell, "FFFFFF")
+        current_kind = None
+        just_saw_question = False
+        for p in cell.paragraphs:
+            if _reading_is_question_start(p.text):
+                _reading_style_question_header_paragraph(p)
+                current_kind = None
+                just_saw_question = True
+                continue
+            if _reading_is_option(p.text):
+                _reading_style_option_paragraph(p, keep_next=just_saw_question)
+                just_saw_question = False
+                continue
+            if just_saw_question and (p.text or "").strip():
+                _reading_style_question_continuation(p)
+                just_saw_question = False
+                continue
+            kind = _reading_teacher_label_kind(p.text)
+            if kind:
+                current_kind = kind
+                # If this note block is only the one-line no-note message, keep it quiet.
+                next_text = ""
+                try:
+                    p_el = p._p
+                    parent = p_el.getparent()
+                    children = list(parent)
+                    ix = children.index(p_el)
+                    for nxt in children[ix+1:]:
+                        if nxt.tag == qn("w:p"):
+                            from docx.text.paragraph import Paragraph
+                            next_text = Paragraph(nxt, p._parent).text.strip()
+                            break
+                except Exception:
+                    pass
+                _reading_style_teacher_label(
+                    p, kind,
+                    low_weight=(kind == "note" and "本題不另設語文筆記" in next_text)
+                )
+            else:
+                _reading_style_teacher_body_paragraph(p, current_kind=current_kind)
+
+        for nested in cell.tables:
+            _reading_style_note_table(nested)
+
+
+def _reading_style_question_table(tbl):
+    """Question-with-image table: keep its relation, remove hard frame, style text side."""
+    _remove_table_borders(tbl)
+    for cell in tbl._cells:
+        _set_cell_margins(cell, top=40, bottom=40, start=70, end=70)
+        just_saw_question = False
+        for p in cell.paragraphs:
+            if _reading_is_question_start(p.text):
+                _reading_style_question_header_paragraph(p)
+                just_saw_question = True
+            elif _reading_is_option(p.text):
+                _reading_style_option_paragraph(p, keep_next=just_saw_question)
+                just_saw_question = False
+            elif (p.text or "").strip():
+                _reading_style_question_continuation(p)
+                just_saw_question = False
+
+
+def _reading_iter_block_items(doc):
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    body = doc.element.body
+    for child in body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, doc)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, doc)
+
+
+def _reading_unwrap_outer_teacher_boxes(doc):
+    """Convert generated 1x1 teacher boxes into normal premium body flow.
+
+    Every paragraph and nested table is moved in the same order. No wording,
+    image, answer, note or question relationship is changed. Formal export stays untouched.
+    """
+    body = doc.element.body
+    for child in list(body):
+        if child.tag != qn("w:tbl"):
+            continue
+        try:
+            tbl = Table(child, doc)
+            if len(tbl.rows) != 1 or len(tbl.columns) != 1:
+                continue
+            cell = tbl.cell(0, 0)
+            txt = cell.text or ""
+            if "解析：" not in txt and "【教學步驟】" not in txt:
+                continue
+            insert_at = list(body).index(child)
+            moved = []
+            for node in list(cell._tc):
+                if node.tag in (qn("w:p"), qn("w:tbl")):
+                    moved.append(copy.deepcopy(node))
+            for offset, node in enumerate(moved):
+                body.insert(insert_at + offset, node)
+            body.remove(child)
+        except Exception:
+            continue
+    return doc
+
+
+def _reading_apply_premium_style(doc):
+    # Page/normal styles: comfortable reading, no new content.
+    _reading_unwrap_outer_teacher_boxes(doc)
+    for sec in doc.sections:
+        sec.top_margin = Cm(1.55)
+        sec.bottom_margin = Cm(1.45)
+        sec.left_margin = Cm(1.65)
+        sec.right_margin = Cm(1.65)
+
+    normal = doc.styles["Normal"]
+    normal.font.name = "Microsoft JhengHei"
+    try:
+        normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft JhengHei")
+    except Exception:
+        pass
+    normal.font.size = Pt(10.7)
+    normal.font.color.rgb = RGBColor.from_string(QUALITY["body"])
+    normal.paragraph_format.line_spacing = 1.15
+
+    after_question = False
+    prev_was_q_prefix_only = False
+    just_saw_question = False
+    current_teacher_kind = None
+
+    for block in _reading_iter_block_items(doc):
+        if hasattr(block, "text") and block.__class__.__name__ == "Paragraph":
+            p = block
+            s = (p.text or "").strip()
+            if not s:
+                p.paragraph_format.space_after = Pt(1.5)
+                continue
+
+            # Document title.
+            if p is doc.paragraphs[0]:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p.paragraph_format.space_before = Pt(0)
+                p.paragraph_format.space_after = Pt(10)
+                _reading_keep(p, with_next=True)
+                _reading_style_all_runs(p, size=16.5, color=QUALITY["dark"], bold=True)
+                continue
+
+            if _reading_is_section(s):
+                current_teacher_kind = None
+                _reading_style_section_paragraph(p)
+                continue
+
+            if _reading_is_group_prompt(s):
+                current_teacher_kind = None
+                _reading_style_group_prompt(p)
+                continue
+
+            if _reading_is_question_start(s):
+                current_teacher_kind = None
+                _reading_style_question_header_paragraph(p)
+                after_question = True
+                just_saw_question = True
+                # Prefix-only lines occur with image layout; style next stem as continuation.
+                prev_was_q_prefix_only = len(s) < 18
+                continue
+
+            if prev_was_q_prefix_only and not _reading_is_option(s):
+                _reading_style_question_continuation(p)
+                prev_was_q_prefix_only = False
+                continue
+
+            if _reading_is_option(s):
+                _reading_style_option_paragraph(p, keep_next=just_saw_question)
+                just_saw_question = False
+                continue
+
+            _tkind = _reading_teacher_label_kind(s)
+            if _tkind:
+                current_teacher_kind = _tkind
+                _reading_style_teacher_label(p, _tkind, low_weight=(_tkind == "note"))
+                continue
+
+            if current_teacher_kind:
+                _reading_style_teacher_body_paragraph(p, current_kind=current_teacher_kind)
+            else:
+                _reading_style_regular_paragraph(p)
+
+        else:
+            tbl = block
+            # Historical teacher box can be recognized by label text.
+            joined = "\n".join(c.text for row in tbl.rows for c in row.cells)
+            if "解析：" in joined or "【教學步驟】" in joined:
+                _reading_style_teacher_table(tbl)
+            elif current_teacher_kind == "note":
+                _reading_style_note_table(tbl)
+            else:
+                _reading_style_question_table(tbl)
+
+    # Avoid title/heading orphaning in all tables too.
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    try:
+                        p.paragraph_format.widow_control = True
+                    except Exception:
+                        pass
+    return doc
+
+
+def _reading_premium_from_formal_bytes(formal_bytes):
+    """Pure visual post-processing: same DOCX content/structure, new reading theme."""
+    doc = Document(io.BytesIO(formal_bytes))
+    _reading_apply_premium_style(doc)
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
 
 
-# ---------- PPTX: minimum title 36 pt / body 24 pt ----------
-def _ppt_add_text(slide, x, y, w, h, text, size=24, bold=False,
-                  color="222222", fill=None, align=PP_ALIGN.LEFT):
-    shape = slide.shapes.add_textbox(PptxInches(x), PptxInches(y),
-                                     PptxInches(w), PptxInches(h))
+def make_quality_teacher_handbook_docx(questions: List[Question], year: int, title_suffix: str,
+                                       template_kind="自訂簡版", booklet_no=""):
+    """Reading-theme visual upgrade of the *existing formal teacher edition*.
+
+    The formal teacher DOCX is generated first by the unchanged original export
+    function. Then only Word styling/layout is post-processed. Therefore the
+    premium file inherits the same content, order, group logic, images, tables,
+    and conditional fields as the formal teacher edition.
+    """
+    formal_teacher_bytes = make_editable_exam_layout_docx(
+        questions,
+        year,
+        title_suffix,
+        teacher=True,
+        template_kind=template_kind,
+        booklet_no=booklet_no,
+    )
+    return _reading_premium_from_formal_bytes(formal_teacher_bytes)
+
+
+def _ppt_textbox(slide, x, y, w, h, text, size=18, bold=False,
+                 color="1F2A44", fill=None, align=None):
+    shape = slide.shapes.add_textbox(PptxInches(x), PptxInches(y), PptxInches(w), PptxInches(h))
     tf = shape.text_frame
     tf.clear()
     tf.word_wrap = True
-    tf.margin_left = PptxInches(0.08)
-    tf.margin_right = PptxInches(0.08)
-    tf.margin_top = PptxInches(0.05)
-    tf.margin_bottom = PptxInches(0.05)
+    tf.margin_left = PptxInches(0.06)
+    tf.margin_right = PptxInches(0.06)
+    tf.margin_top = PptxInches(0.03)
+    tf.margin_bottom = PptxInches(0.03)
     p = tf.paragraphs[0]
-    p.alignment = align
-    r = p.add_run()
-    r.text = _clean_word_text(text or "")
-    r.font.name = "Microsoft JhengHei"
-    r.font.size = PptxPt(max(24, size))
-    r.font.bold = bold
-    r.font.color.rgb = PptxRGBColor.from_string(color)
+    if align is not None:
+        p.alignment = align
+    run = p.add_run()
+    run.text = _clean_word_text(text or "")
+    run.font.name = "Microsoft JhengHei"
+    run.font.size = PptxPt(size)
+    run.font.bold = bold
+    run.font.color.rgb = PptxRGBColor.from_string(color)
     if fill:
         shape.fill.solid()
         shape.fill.fore_color.rgb = PptxRGBColor.from_string(fill)
-        shape.line.color.rgb = PptxRGBColor.from_string("7F8C9A")
+        shape.line.color.rgb = PptxRGBColor.from_string(fill)
     return shape
 
 
-def _ppt_title(slide, text):
-    return _ppt_add_text(slide, 0.45, 0.18, 12.4, 0.65, text,
-                         size=36, bold=True, color="1F2A44")
+def _ppt_add_lines(slide, x, y, w, h, title, body, max_chars=900):
+    _ppt_textbox(slide, x, y, w, 0.35, title, size=16, bold=True, color="C24A2E")
+    txt = _clean_word_text(body or "")
+    if len(txt) > max_chars:
+        txt = txt[:max_chars].rstrip() + "……"
+    _ppt_textbox(slide, x, y+0.42, w, h-0.42, txt, size=12.5, color="222222", fill="F7F9FC")
 
 
-def _ppt_chunks(text, max_chars=300):
-    """Split only for readability; never delete/truncate teacher-edition content."""
-    s = _clean_word_text(text or "").strip()
-    if not s:
-        return [""]
-    paras = [x.strip() for x in s.splitlines() if x.strip()]
-    chunks, cur = [], ""
-    for para in paras:
-        # Hard-wrap very long paragraph without changing characters.
-        pieces = textwrap.wrap(para, width=max_chars, break_long_words=False,
-                               break_on_hyphens=False) or [para]
-        for piece in pieces:
-            if cur and len(cur) + 1 + len(piece) > max_chars:
-                chunks.append(cur)
-                cur = piece
-            else:
-                cur = piece if not cur else cur + "\n" + piece
-    if cur:
-        chunks.append(cur)
-    return chunks or [""]
-
-
-def _ppt_image_temp(data):
+def _ppt_save_image(data):
     if not data:
         return None
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    f.write(data); f.close()
+    f.write(data)
+    f.close()
     return f.name
 
 
-def _ppt_place_image(slide, data, x, y, w, h):
-    path = _ppt_image_temp(data)
+def _ppt_add_image(slide, img_data, x, y, w, h):
+    path = _ppt_save_image(img_data)
     if not path:
         return
     try:
+        # Simple contain-fit.
         im = Image.open(path)
         iw, ih = im.size
-        ir, br = iw / max(ih, 1), w / h
-        if ir >= br:
-            hh = w / ir
-            slide.shapes.add_picture(path, PptxInches(x), PptxInches(y + (h-hh)/2),
-                                     width=PptxInches(w))
+        ratio = min(w / max(iw, 1), h / max(ih, 1))
+        # Convert pixel ratio to inches by preserving box ratio; easiest: use height or width.
+        box_ratio = w / h
+        img_ratio = iw / max(ih, 1)
+        if img_ratio >= box_ratio:
+            slide.shapes.add_picture(path, PptxInches(x), PptxInches(y + (h - w/img_ratio)/2), width=PptxInches(w))
         else:
-            ww = h * ir
-            slide.shapes.add_picture(path, PptxInches(x + (w-ww)/2), PptxInches(y),
-                                     height=PptxInches(h))
+            slide.shapes.add_picture(path, PptxInches(x + (w - h*img_ratio)/2), PptxInches(y), height=PptxInches(h))
+    except Exception:
+        pass
     finally:
-        try: os.unlink(path)
-        except Exception: pass
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
 
 
-def _ppt_add_body_slides(prs, blank, title, body, label_fill="F7F9FC"):
-    for n, chunk in enumerate(_ppt_chunks(body, 330), start=1):
-        slide = prs.slides.add_slide(blank)
-        suffix = f"（{n}/{len(_ppt_chunks(body,330))}）" if len(_ppt_chunks(body,330)) > 1 else ""
-        _ppt_title(slide, title + suffix)
-        _ppt_add_text(slide, 0.6, 1.05, 12.1, 5.95, chunk,
-                      size=24, color="222222", fill=label_fill)
-    return
-
-
-def _ppt_add_real_table(prs, blank, title, raw):
+def _ppt_note_table_text(raw):
     spec = _parse_note_strategy_table(_normalize_language_note_table(raw or ""))
     if not spec:
-        return
-    # Split rows so 24pt remains readable. Repeat header on each slide.
-    rows_per_slide = 4 if len(spec["columns"]) <= 3 else 3
-    rows = spec["rows"] or []
-    groups = [rows[i:i+rows_per_slide] for i in range(0, len(rows), rows_per_slide)] or [[]]
-    for gi, group in enumerate(groups, start=1):
-        slide = prs.slides.add_slide(blank)
-        suffix = f"（{gi}/{len(groups)}）" if len(groups) > 1 else ""
-        _ppt_title(slide, title + suffix)
-        if spec.get("title"):
-            _ppt_add_text(slide, 0.65, 0.92, 12.0, 0.55, spec["title"],
-                          size=24, bold=True, color="7030A0")
-            y = 1.55
-        else:
-            y = 1.05
-        rows_n, cols_n = 1 + len(group), len(spec["columns"])
-        shape = slide.shapes.add_table(rows_n, cols_n, PptxInches(0.6),
-                                       PptxInches(y), PptxInches(12.1),
-                                       PptxInches(5.3 if y < 1.2 else 4.8))
-        table = shape.table
-        for j, col in enumerate(spec["columns"]):
-            cell = table.cell(0, j)
-            cell.text = _clean_word_text(col)
-            cell.fill.solid(); cell.fill.fore_color.rgb = PptxRGBColor.from_string("D9E2F3")
-            for p in cell.text_frame.paragraphs:
-                p.alignment = PP_ALIGN.CENTER
-                for r in p.runs:
-                    r.font.name = "Microsoft JhengHei"; r.font.size = PptxPt(24); r.font.bold = True
-                    r.font.color.rgb = PptxRGBColor.from_string("1F2A44")
-        for ri, row in enumerate(group, start=1):
-            for j, val in enumerate(row):
-                cell = table.cell(ri, j)
-                cell.text = _clean_word_text(val)
-                cell.fill.solid(); cell.fill.fore_color.rgb = PptxRGBColor.from_string("FFFFFF")
-                for p in cell.text_frame.paragraphs:
-                    for r in p.runs:
-                        r.font.name = "Microsoft JhengHei"; r.font.size = PptxPt(24)
-                        r.font.color.rgb = PptxRGBColor.from_string("222222")
-        if spec.get("footer") and gi == len(groups):
-            _ppt_add_text(slide, 0.65, 6.65, 12.0, 0.45, spec["footer"],
-                          size=24, color="666666")
+        return ""
+    lines = []
+    if spec.get("title"):
+        lines.append(spec["title"])
+    cols = spec["columns"]
+    lines.append("｜".join(cols))
+    for row in spec["rows"]:
+        lines.append("｜".join(row))
+    if spec.get("footer"):
+        lines.append(spec["footer"])
+    return "\n".join(lines)
 
 
 def make_classroom_pptx(questions: List[Question], year: int, title_suffix: str,
                         template_kind="自訂簡版", booklet_no=""):
-    """PPTX contains the same content as formal teacher edition.
-
-    No summaries or invented content. Existing tables become real PPT tables;
-    source images remain images. Text is split across slides instead of shrunk.
-    """
     selected = [q for q in questions if q.selected]
     prs = Presentation()
     prs.slide_width = PptxInches(13.333)
     prs.slide_height = PptxInches(7.5)
     blank = prs.slide_layouts[6]
 
-    label = ("通過率達八成以上" if template_kind == "八成以上"
-             else "通過率達六成至七成" if template_kind == "六成至七成"
-             else (title_suffix or "").strip())
+    label = "八成以上" if template_kind == "八成以上" else "六成至七成" if template_kind == "六成至七成" else "自訂"
 
     slide = prs.slides.add_slide(blank)
-    _ppt_title(slide, f"{year}年會考國文題本-{label}")
-    _ppt_add_text(slide, 0.7, 1.55, 11.9, 1.4,
-                  f"題本{booklet_no.strip() or '自動'}（詳解_教學法）",
-                  size=28, bold=True, color="C24A2E", align=PP_ALIGN.CENTER)
+    _ppt_textbox(slide, 0.55, 0.55, 12.2, 0.7, f"{year}會考國文課堂簡報｜{label} 題本 {booklet_no.strip() or ''}", size=30, bold=True)
+    _ppt_textbox(slide, 0.65, 1.45, 11.5, 0.4, "投影教學版：題目、答案解析、教學重點與課堂筆記", size=16, color="666666")
+    _ppt_textbox(slide, 0.65, 5.95, 11.5, 0.35, f"共 {len(selected)} 題", size=14, color="C24A2E")
 
     for i, q in enumerate(selected, start=1):
-        # QUESTION: editable text when formal edition uses text, image when source is image.
-        mode = _effective_render_mode(q)
-        if mode == "整題圖像" and (q.body_crop_png or q.crop_png):
-            slide = prs.slides.add_slide(blank)
-            _ppt_title(slide, f"第 {i} 題｜答案：{q.answer or '—'}")
-            meta = f"{year}年第{q.source_no}題｜通過率：{q.pass_rate:.2f}" if q.pass_rate is not None else f"{year}年第{q.source_no}題"
-            _ppt_add_text(slide, 0.65, 0.88, 12.0, 0.55,
-                          f"{meta}｜能力類型：{q.category or '—'}",
-                          size=24, bold=True, color="566573")
-            _ppt_place_image(slide, q.body_crop_png or q.crop_png, 0.8, 1.55, 11.7, 5.35)
-        else:
-            question_text = ""
-            if (q.material or "").strip() and not (q.group_id or "").strip():
-                question_text += _clean_word_text(q.material) + "\n\n"
-            question_text += _clean_word_text(q.text or "")
-            for k in ("A","B","C","D"):
-                if (q.options or {}).get(k):
-                    question_text += f"\n({k}) {_clean_word_text(q.options[k])}"
-            qchunks = _ppt_chunks(question_text, 250)
-            imgs = list(q.image_pngs or []) if q.include_image else []
-            for ci, chunk in enumerate(qchunks, start=1):
-                slide = prs.slides.add_slide(blank)
-                suffix = f"（{ci}/{len(qchunks)}）" if len(qchunks) > 1 else ""
-                _ppt_title(slide, f"第 {i} 題{suffix}｜答案：{q.answer or '—'}")
-                meta = f"{year}年第{q.source_no}題｜通過率：{q.pass_rate:.2f}" if q.pass_rate is not None else f"{year}年第{q.source_no}題"
-                _ppt_add_text(slide, 0.65, 0.88, 12.0, 0.55,
-                              f"{meta}｜能力類型：{q.category or '—'}",
-                              size=24, bold=True, color="566573")
-                if imgs and ci == 1:
-                    _ppt_add_text(slide, 0.6, 1.55, 7.0, 5.35, chunk,
-                                  size=24, color="222222", fill="F7F9FC")
-                    _ppt_place_image(slide, imgs[0], 7.9, 1.55, 4.8, 5.35)
-                else:
-                    _ppt_add_text(slide, 0.6, 1.55, 12.1, 5.35, chunk,
-                                  size=24, color="222222", fill="F7F9FC")
-            # Additional source images get their own image slide, preserving content.
-            for extra_i, data in enumerate(imgs[1:], start=2):
-                slide = prs.slides.add_slide(blank)
-                _ppt_title(slide, f"第 {i} 題｜原題圖片 {extra_i}")
-                _ppt_place_image(slide, data, 0.8, 1.1, 11.7, 5.9)
+        # Slide 1: question.
+        slide = prs.slides.add_slide(blank)
+        _ppt_textbox(slide, 0.35, 0.20, 8.0, 0.45, f"第 {i} 題｜{q.category or ''}", size=22, bold=True)
+        meta = f"答案 {q.answer or '—'}｜通過率 {q.pass_rate:.2f}" if q.pass_rate is not None else f"答案 {q.answer or '—'}"
+        _ppt_textbox(slide, 9.1, 0.25, 3.6, 0.35, meta, size=13, bold=True, color="C24A2E", align=PP_ALIGN.RIGHT)
+        content = ""
+        if (q.material or "").strip():
+            content += "【閱讀／共用材料】\n" + _clean_word_text(q.material)[:500] + "\n\n"
+        content += "【題幹】\n" + _clean_word_text(q.text or "") + "\n"
+        for k in ("A","B","C","D"):
+            if (q.options or {}).get(k):
+                content += f"\n({k}) {_clean_word_text(q.options[k])}"
+        _ppt_textbox(slide, 0.45, 0.85, 7.2, 6.15, content[:1500], size=13.5, color="222222", fill="F7F9FC")
+        img = None
+        if getattr(q, "body_crop_png", None):
+            img = q.body_crop_png
+        elif getattr(q, "image_pngs", None):
+            img = q.image_pngs[0] if q.image_pngs else None
+        elif getattr(q, "crop_png", None):
+            img = q.crop_png
+        if img:
+            _ppt_add_image(slide, img, 8.0, 1.0, 4.8, 5.7)
 
-        # SAME teacher-edition fields, in the same logical order.
-        _ppt_add_body_slides(prs, blank, f"第 {i} 題｜解析",
-                              q.explanation or "（待補）", "FFF8F6")
+        # Slide 2: explanation.
+        slide = prs.slides.add_slide(blank)
+        _ppt_textbox(slide, 0.35, 0.20, 9.0, 0.45, f"第 {i} 題｜答案與詳解", size=22, bold=True)
+        _ppt_textbox(slide, 10.0, 0.25, 2.8, 0.35, f"答案：{q.answer or '—'}", size=16, bold=True, color="C24A2E", align=PP_ALIGN.RIGHT)
+        if (getattr(q, "translation", "") or "").strip():
+            _ppt_add_lines(slide, 0.55, 0.85, 5.9, 2.25, "語譯", q.translation, max_chars=500)
+            _ppt_add_lines(slide, 6.75, 0.85, 5.9, 5.85, "詳解", q.explanation or "（待補）", max_chars=900)
+        else:
+            _ppt_add_lines(slide, 0.55, 0.85, 12.1, 5.85, "詳解", q.explanation or "（待補）", max_chars=1200)
+
+        # Slide 3: teaching + notes.
+        slide = prs.slides.add_slide(blank)
+        _ppt_textbox(slide, 0.35, 0.20, 9.0, 0.45, f"第 {i} 題｜教學與筆記", size=22, bold=True)
+        left_body = ""
         if (q.teaching_focus or "").strip():
-            _ppt_add_body_slides(prs, blank, f"第 {i} 題｜教學重點",
-                                  q.teaching_focus, "F8FCF7")
-        _ppt_add_body_slides(prs, blank, f"第 {i} 題｜教學步驟",
-                              q.teaching or "（待補）", "F8FCF7")
+            left_body += "【教學重點】\n" + q.teaching_focus + "\n\n"
+        left_body += "【教學步驟】\n" + (q.teaching or "（待補）")
+        _ppt_add_lines(slide, 0.55, 0.85, 5.85, 5.85, "教學設計", left_body, max_chars=900)
+        notes = ""
         if (q.note_strategy or "").strip():
-            _ppt_add_body_slides(prs, blank, f"第 {i} 題｜筆記策略",
-                                  q.note_strategy, "FAF9FC")
-        _ppt_add_real_table(prs, blank, f"第 {i} 題｜筆記", q.note_strategy_table_json)
+            notes += "【筆記策略】\n" + q.note_strategy + "\n\n"
+        table_text = _ppt_note_table_text(q.note_strategy_table_json)
+        if table_text:
+            notes += "【課堂筆記】\n" + table_text
+        if not notes.strip():
+            notes = "本題不另設語文筆記。"
+        _ppt_add_lines(slide, 6.75, 0.85, 5.85, 5.85, "課堂筆記", notes, max_chars=900)
 
     out = io.BytesIO()
     prs.save(out)
@@ -5986,7 +6471,7 @@ def _load_annual_project_zip(zip_bytes: bytes):
                 }
         st.session_state.project_sources = restored_sources
 
-        # v6.18.3: universal project compatibility pass.
+        # v6.18.8: universal project compatibility pass.
         # Original annual sources bundled in the ZIP are used only to UPGRADE
         # weak/misaligned publisher reference blocks. Existing good blocks and
         # all teacher-edited Question fields remain untouched.
@@ -7599,7 +8084,7 @@ with output_tab:
                     _missing.append("教師版")
                 st.error(
                     "缺少正式 Word 範本：" + "、".join(_missing) +
-                    "。請使用 v6.18.3 完整 ZIP 執行；若只單獨放 app.py，"
+                    "。請使用 v6.18.8 完整 ZIP 執行；若只單獨放 app.py，"
                     "必須把四份 template_*.docx 放在 app.py 同一資料夾。"
                 )
         booklet_no = st.text_input(
@@ -7716,8 +8201,8 @@ with output_tab:
         st.divider()
         st.markdown("#### 進階匯出")
         st.caption(
-            "以下兩種輸出與目前教師版使用完全相同的內容，不新增摘要或其他文字，只改呈現方式。"
-            "質感版改為單一藍灰色系，以深淺區分題目資訊、解析、教學與筆記；欄位標題與內容置於同一卡片，避免跨頁錯位。PPT 標題至少36pt、內文至少24pt，表格維持表格、圖片維持圖片。"
+            "以下是新增選項，不取代上方正式學生版／教師版。"
+            "質感版 DOCX 與課堂 PPTX 都讀取同一份正式編輯內容；一般文字與表格仍可複製、可編輯。"
         )
         adv1, adv2 = st.columns(2)
         with adv1:
