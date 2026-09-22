@@ -30,7 +30,7 @@ from pptx.dml.color import RGBColor as PptxRGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 
-APP_VERSION = "Web v6.18.8 文言語譯教師版修正版"
+APP_VERSION = "Web v6.18.10 教師版移除教學重點"
 
 
 RECOMMENDATION_EVIDENCE_RULE = """
@@ -1043,29 +1043,20 @@ def _add_legacy_teacher_box(doc, q: Question):
     cell = table.cell(0, 0)
     _set_cell_margins(cell, top=0, start=108, bottom=0, end=108)
 
-    # Clear the default paragraph.  文言題依既有資料先輸出語譯，再輸出解析；
-    # 非文言題則直接從解析開始。只使用既有 q.translation，不生成任何新文字。
+    # 先輸出解析，再於文言題解析下方輸出既有語譯。
     p0 = cell.paragraphs[0]
     p0.text = ""
     _set_body_paragraph_format(p0, before=1.2, after=0)
-
-    if (getattr(q, "translation", "") or "").strip():
-        r = p0.add_run("【語譯】：")
-        _set_run_word_style(r, font="標楷體", size=12, color=RGBColor(255, 0, 0), bold=False)
-        _add_red_multiline(cell, q.translation)
-        _add_red_paragraph(cell, "", label=False)
-        _add_red_paragraph(cell, "解析：", label=True)
-    else:
-        r = p0.add_run("解析：")
-        _set_run_word_style(r, font="標楷體", size=12, color=RGBColor(255, 0, 0), bold=False)
-
-    # 解析正文不可遺漏。
+    r = p0.add_run("解析：")
+    _set_run_word_style(r, font="標楷體", size=12, color=RGBColor(255, 0, 0), bold=False)
     _add_red_multiline(cell, q.explanation or "（待補）")
 
-    if (q.teaching_focus or "").strip():
+    # 文言題：語譯固定放在解析下方；只有既有 translation 有內容時才輸出。
+    if (getattr(q, "translation", "") or "").strip():
         _add_red_paragraph(cell, "", label=False)
-        _add_red_paragraph(cell, "【教學重點】：", label=True)
-        _add_red_multiline(cell, q.teaching_focus)
+        _add_red_paragraph(cell, "【語譯】：", label=True)
+        _add_red_multiline(cell, q.translation)
+
 
     _add_red_paragraph(cell, "", label=False)
     _add_red_paragraph(cell, "【教學步驟】：", label=True)
@@ -2008,7 +1999,7 @@ def _formal_booklet_filename(year: int, template_kind: str, booklet_no: str, tea
 # -----------------------------
 # Premium teacher handbook / classroom slides export
 # -----------------------------
-# v6.18.8: the premium DOCX is NOT a second content model.
+# v6.18.10: the premium DOCX is NOT a second content model.
 # It mirrors the formal teacher edition's content/order/conditional blocks (including 文言語譯) and
 # changes only typography, spacing, colors, borders and pagination behavior.
 
@@ -6471,7 +6462,7 @@ def _load_annual_project_zip(zip_bytes: bytes):
                 }
         st.session_state.project_sources = restored_sources
 
-        # v6.18.8: universal project compatibility pass.
+        # v6.18.10: universal project compatibility pass.
         # Original annual sources bundled in the ZIP are used only to UPGRADE
         # weak/misaligned publisher reference blocks. Existing good blocks and
         # all teacher-edited Question fields remain untouched.
@@ -8084,7 +8075,7 @@ with output_tab:
                     _missing.append("教師版")
                 st.error(
                     "缺少正式 Word 範本：" + "、".join(_missing) +
-                    "。請使用 v6.18.8 完整 ZIP 執行；若只單獨放 app.py，"
+                    "。請使用 v6.18.10 完整 ZIP 執行；若只單獨放 app.py，"
                     "必須把四份 template_*.docx 放在 app.py 同一資料夾。"
                 )
         booklet_no = st.text_input(
